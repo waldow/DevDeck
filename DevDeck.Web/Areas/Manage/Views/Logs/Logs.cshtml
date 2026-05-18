@@ -1,0 +1,25 @@
+@{
+    var serviceName = ViewBag.ServiceName as string;
+    var serviceId = (int)(ViewBag.ServiceId ?? 0);
+    var isRunning = ViewBag.IsRunning as bool? == true;
+    ViewData["Title"] = $"Logs — {serviceName}";
+    ViewData["PageTitle"] = $"Logs — {serviceName}";
+    ViewData["Crumb"] = "Live log";
+}
+
+@section Actions {
+    <a class="btn btn-ghost" asp-area="Manage" asp-controller="Services" asp-action="Details" asp-route-id="@serviceId">Service details</a>
+    <form class="inline" method="post" asp-area="Manage" asp-controller="Logs" asp-action="ServiceLogsClear" asp-route-id="@serviceId">@Html.AntiForgeryToken()<button class="btn btn-warn" type="submit">Clear view</button></form>
+}
+
+<div class="log-toolbar">
+    <span class="pill @(isRunning ? "pill-running" : "pill-stopped")" id="runState">@(isRunning ? "Running" : "Stopped")</span>
+    <label class="dim"><input type="checkbox" id="autoscroll" checked /> Auto-scroll</label>
+    <span class="dim mono" id="lineCount">0 lines</span>
+</div>
+
+<div class="log-panel" id="logpanel" data-service-id="@serviceId"></div>
+
+@section Scripts {
+    <script src="~/js/logs.js" asp-append-version="true"></script>
+}
