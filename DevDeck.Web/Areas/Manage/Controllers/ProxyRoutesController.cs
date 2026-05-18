@@ -223,7 +223,7 @@ public sealed class ProxyRoutesController : Controller
             vm.ServiceRunning = _manager.GetRunningProcess(entity.DevService.Id) is not null;
             if (entity.DevService.Port is int port)
             {
-                vm.DestinationPortOpen = await PortProbeService.IsPortOpenAsync(port);
+                vm.DestinationPortOpen = await _portProbe.IsPortOpenAsync(port);
             }
             var hc = await db.ServiceHealthChecks
                 .Where(h => h.DevServiceId == entity.DevService.Id && h.Enabled)
@@ -233,7 +233,7 @@ public sealed class ProxyRoutesController : Controller
         }
         else if (destinationUrl is not null && Uri.TryCreate(destinationUrl, UriKind.Absolute, out var uri))
         {
-            vm.DestinationPortOpen = await PortProbeService.IsPortOpenAsync(uri.Port);
+            vm.DestinationPortOpen = await _portProbe.IsPortOpenAsync(uri.Port);
         }
 
         if (ReservedPaths.IsReserved(entity.MatchPath, out var reason))

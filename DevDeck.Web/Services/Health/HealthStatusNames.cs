@@ -7,6 +7,7 @@ public static class HealthStatusNames
     public const string Unhealthy = "Unhealthy";
     public const string Timeout = "Timeout";
     public const string NotRunning = "NotRunning";
+    public const string Warming = "Warming";
 }
 
 public enum PortStatus

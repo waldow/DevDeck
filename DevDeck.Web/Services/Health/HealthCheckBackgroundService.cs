@@ -81,7 +81,7 @@ public sealed class HealthCheckBackgroundService : BackgroundService
                 check.LastStatus = HealthStatusNames.NotRunning;
                 check.LastStatusCode = null;
                 check.LastError = null;
-                _healthStatusCache.Set(service.Id, check.LastStatus);
+                _healthStatusCache.Set(service.Id, check.Id, check.LastStatus);
                 continue;
             }
 
@@ -97,21 +97,21 @@ public sealed class HealthCheckBackgroundService : BackgroundService
                     ? HealthStatusNames.Healthy
                     : HealthStatusNames.Unhealthy;
                 check.LastError = null;
-                _healthStatusCache.Set(service.Id, check.LastStatus);
+                _healthStatusCache.Set(service.Id, check.Id, check.LastStatus);
             }
             catch (TaskCanceledException)
             {
                 check.LastStatus = HealthStatusNames.Timeout;
                 check.LastStatusCode = null;
                 check.LastError = "Timed out";
-                _healthStatusCache.Set(service.Id, check.LastStatus);
+                _healthStatusCache.Set(service.Id, check.Id, check.LastStatus);
             }
             catch (Exception ex)
             {
                 check.LastStatus = HealthStatusNames.Unhealthy;
                 check.LastStatusCode = null;
                 check.LastError = ex.Message;
-                _healthStatusCache.Set(service.Id, check.LastStatus);
+                _healthStatusCache.Set(service.Id, check.Id, check.LastStatus);
             }
         }
 

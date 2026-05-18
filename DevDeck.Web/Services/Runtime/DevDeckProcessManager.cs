@@ -1,9 +1,11 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using DevDeck.Web.Data;
 using DevDeck.Web.Data.Entities;
 using DevDeck.Web.Options;
 using DevDeck.Web.Services.Commands;
+using DevDeck.Web.Services.Health;
 using DevDeck.Web.Services.Logs;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -21,7 +23,10 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
     private readonly CommandExecutableResolver _resolver;
     private readonly IOptionsMonitor<DevDeckOptions> _options;
     private readonly IWebHostEnvironment _environment;
+    private readonly HealthStatusCache _healthStatusCache;
     private readonly ILogger<DevDeckProcessManager> _logger;
+
+    private static readonly TimeSpan PostStartHealthWarmup = TimeSpan.FromSeconds(15);
 
     public DevDeckProcessManager(
         IDbContextFactory<DevDeckDbContext> dbFactory,
@@ -31,6 +36,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
         CommandExecutableResolver resolver,
         IOptionsMonitor<DevDeckOptions> options,
         IWebHostEnvironment environment,
+        HealthStatusCache healthStatusCache,
         ILogger<DevDeckProcessManager> logger)
     {
         _dbFactory = dbFactory;
@@ -40,6 +46,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
         _resolver = resolver;
         _options = options;
         _environment = environment;
+        _healthStatusCache = healthStatusCache;
         _logger = logger;
     }
 
@@ -183,6 +190,9 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
             run.ProcessId = SafePid(process);
             await db.SaveChangesAsync(cancellationToken);
 
+            // Give health checks a grace window before they can fail proxy gates.
+            _healthStatusCache.MarkStarting(service.Id, PostStartHealthWarmup);
+
             try
             {
                 process.BeginOutputReadLine();
@@ -240,8 +250,11 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
             {
                 if (!info.Process.HasExited)
                 {
-                    TryCloseMainWindow(info.Process);
-                    exited = await WaitForExitAsync(info.Process, timeout, cancellationToken);
+                    var signalled = TrySendGracefulShutdown(info.Process, serviceId, info.ServiceRunId, info.LogFilePath);
+                    if (signalled)
+                    {
+                        exited = await WaitForExitAsync(info.Process, timeout, cancellationToken);
+                    }
                 }
                 else
                 {
@@ -368,6 +381,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
         try { exitCode = process.ExitCode; } catch { /* ignore */ }
         AppendSystemLine(serviceId, runId, logPath, $"Process exited with code {exitCode?.ToString() ?? "?"}");
         _running.TryRemove(serviceId, out var info);
+        _healthStatusCache.RemoveService(serviceId);
         _logFileWriter.Close(logPath);
 
         try
@@ -415,20 +429,48 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
         }
     }
 
-    private static void TryCloseMainWindow(Process process)
+    private bool TrySendGracefulShutdown(Process process, int serviceId, long runId, string logPath)
     {
         try
         {
-            if (!process.HasExited)
+            if (process.HasExited) return false;
+
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                process.CloseMainWindow();
+                // CloseMainWindow only reaches processes that have a main window; console
+                // children won't react but the kill fallback handles them.
+                var closed = process.CloseMainWindow();
+                AppendSystemLine(serviceId, runId, logPath,
+                    closed ? "Sent close to main window" : "No main window; awaiting kill fallback");
+                return true;
             }
+
+            // Unix: send SIGTERM via libc kill — Process.Kill() is SIGKILL on .NET so we
+            // PInvoke directly to let the child shut down gracefully (npm/dotnet/func all
+            // listen for SIGTERM).
+            var pid = SafePid(process);
+            if (pid is null) return false;
+
+            var rc = PosixKill(pid.Value, SIGTERM);
+            if (rc != 0)
+            {
+                AppendSystemLine(serviceId, runId, logPath, $"kill(SIGTERM) failed with errno {Marshal.GetLastWin32Error()}");
+                return false;
+            }
+            AppendSystemLine(serviceId, runId, logPath, "Sent SIGTERM");
+            return true;
         }
-        catch
+        catch (Exception ex)
         {
-            // Some console processes do not expose a main window; kill fallback handles them.
+            AppendSystemLine(serviceId, runId, logPath, $"Graceful shutdown signal failed: {ex.Message}");
+            return false;
         }
     }
+
+    private const int SIGTERM = 15;
+
+    [DllImport("libc", EntryPoint = "kill", SetLastError = true)]
+    private static extern int PosixKill(int pid, int sig);
 
     private static async Task<bool> WaitForExitAsync(Process process, TimeSpan timeout, CancellationToken cancellationToken)
     {

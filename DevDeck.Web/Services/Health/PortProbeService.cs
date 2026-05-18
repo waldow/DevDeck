@@ -36,7 +36,7 @@ public sealed class PortProbeService
         return PortStatus.UsedByOtherProcess;
     }
 
-    public static async Task<bool> IsPortOpenAsync(int port, CancellationToken cancellationToken = default)
+    public async Task<bool> IsPortOpenAsync(int port, CancellationToken cancellationToken = default)
     {
         try
         {

@@ -9,15 +9,18 @@ public sealed class ProxyRequestGuard
 {
     private readonly IDevDeckProcessManager _processManager;
     private readonly HealthStatusCache _healthStatusCache;
+    private readonly PortProbeService _portProbe;
     private readonly IOptionsMonitor<DevDeckOptions> _options;
 
     public ProxyRequestGuard(
         IDevDeckProcessManager processManager,
         HealthStatusCache healthStatusCache,
+        PortProbeService portProbe,
         IOptionsMonitor<DevDeckOptions> options)
     {
         _processManager = processManager;
         _healthStatusCache = healthStatusCache;
+        _portProbe = portProbe;
         _options = options;
     }
 
@@ -40,8 +43,12 @@ public sealed class ProxyRequestGuard
                 return false;
             }
 
+            // The per-service semaphore inside StartServiceAsync serializes parallel cold-starts:
+            // the second caller waits for the first to finish, then sees the service running and
+            // returns "Service is already running." We treat that as success and continue.
             var start = await _processManager.StartServiceAsync(serviceId, context.RequestAborted);
-            if (!start.Success)
+            var nowRunning = _processManager.GetRunningProcess(serviceId) is not null;
+            if (!start.Success && !nowRunning)
             {
                 await WriteUnavailableAsync(context, serviceId, start.Error ?? "The proxied service failed to start.");
                 return false;
@@ -75,7 +82,7 @@ public sealed class ProxyRequestGuard
                 return false;
             }
 
-            if (running.Port is null || await PortProbeService.IsPortOpenAsync(running.Port.Value, cancellationToken))
+            if (running.Port is null || await _portProbe.IsPortOpenAsync(running.Port.Value, cancellationToken))
             {
                 return true;
             }
