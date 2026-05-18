@@ -1,8 +1,11 @@
+using System.Text;
+using System.Text.Json;
 using DevDeck.Web.Areas.Manage.ViewModels;
 using DevDeck.Web.Data;
 using DevDeck.Web.Data.Entities;
 using DevDeck.Web.Services.Commands;
 using DevDeck.Web.Services.Health;
+using DevDeck.Web.Services.Portability;
 using DevDeck.Web.Services.Runtime;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -17,17 +20,23 @@ public sealed class ServicesController : Controller
     private readonly IDevDeckProcessManager _manager;
     private readonly CommandPresetProvider _presets;
     private readonly PortProbeService _portProbe;
+    private readonly PortabilityExporter _exporter;
+    private readonly PortabilityImporter _importer;
 
     public ServicesController(
         IDbContextFactory<DevDeckDbContext> dbFactory,
         IDevDeckProcessManager manager,
         CommandPresetProvider presets,
-        PortProbeService portProbe)
+        PortProbeService portProbe,
+        PortabilityExporter exporter,
+        PortabilityImporter importer)
     {
         _dbFactory = dbFactory;
         _manager = manager;
         _presets = presets;
         _portProbe = portProbe;
+        _exporter = exporter;
+        _importer = importer;
     }
 
     [HttpGet("")]
@@ -285,6 +294,66 @@ public sealed class ServicesController : Controller
         var result = await _manager.StopAllAsync(cancellationToken);
         TempData["Info"] = $"Stopped {result.Stopped} services.";
         return RedirectToAction("Index", "Dashboard");
+    }
+
+    [HttpGet("Export")]
+    public async Task<IActionResult> Export([FromQuery] bool includeSecrets = false, CancellationToken cancellationToken = default)
+    {
+        var bundle = await _exporter.ExportServicesAsync(includeSecrets, singleId: null, cancellationToken);
+        return JsonDownload(bundle, $"devdeck-services-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.json");
+    }
+
+    [HttpGet("Export/{id:int}")]
+    public async Task<IActionResult> ExportOne(int id, [FromQuery] bool includeSecrets = false, CancellationToken cancellationToken = default)
+    {
+        var bundle = await _exporter.ExportServicesAsync(includeSecrets, singleId: id, cancellationToken);
+        if (bundle.Services.Count == 0) return NotFound();
+        var slug = Slugify(bundle.Services[0].Name);
+        return JsonDownload(bundle, $"devdeck-service-{slug}.json");
+    }
+
+    [HttpPost("Import")]
+    [ValidateAntiForgeryToken]
+    [RequestSizeLimit(4_000_000)]
+    public async Task<IActionResult> Import(IFormFile? file, string? json, CancellationToken cancellationToken)
+    {
+        var payload = await ReadPayloadAsync(file, json, cancellationToken);
+        if (payload is null)
+        {
+            TempData["Error"] = "No JSON provided. Pick a file or paste JSON into the dialog.";
+            return RedirectToAction(nameof(Index));
+        }
+
+        var result = await _importer.ImportServicesAsync(payload, cancellationToken);
+        TempData[result.HasErrors ? "Error" : "Info"] = result.ToFlashMessage();
+        TempData["ImportWarnings"] = JsonSerializer.Serialize(result.Warnings.Concat(result.Errors).ToList());
+        return RedirectToAction(nameof(Index));
+    }
+
+    private FileContentResult JsonDownload(object bundle, string fileName)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(bundle, bundle.GetType(), PortabilityJson.Options);
+        return File(bytes, "application/json", fileName);
+    }
+
+    private static async Task<string?> ReadPayloadAsync(IFormFile? file, string? json, CancellationToken cancellationToken)
+    {
+        if (file is { Length: > 0 })
+        {
+            using var reader = new StreamReader(file.OpenReadStream(), Encoding.UTF8);
+            return await reader.ReadToEndAsync(cancellationToken);
+        }
+        return string.IsNullOrWhiteSpace(json) ? null : json;
+    }
+
+    private static string Slugify(string name)
+    {
+        var clean = new StringBuilder(name.Length);
+        foreach (var ch in name.ToLowerInvariant())
+        {
+            clean.Append(char.IsLetterOrDigit(ch) ? ch : '-');
+        }
+        return clean.ToString().Trim('-');
     }
 
     private IActionResult RedirectBackOrDashboard()

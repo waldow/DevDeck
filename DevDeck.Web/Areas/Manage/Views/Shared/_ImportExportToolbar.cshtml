@@ -1,0 +1,90 @@
+@using System.Text.Json
+@model DevDeck.Web.Areas.Manage.ViewModels.ImportExportToolbarModel
+@{
+    var ctrl = Model.ControllerName;
+    var dlgId = $"import-{ctrl.ToLowerInvariant()}-dlg";
+    var warningsJson = TempData["ImportWarnings"] as string;
+    List<string> warnings = new();
+    if (!string.IsNullOrWhiteSpace(warningsJson))
+    {
+        try { warnings = JsonSerializer.Deserialize<List<string>>(warningsJson) ?? new(); }
+        catch { warnings = new(); }
+    }
+}
+
+<section class="io-toolbar" aria-label="Import and export @Model.EntityLabelPlural">
+    <details class="dropdown">
+        <summary class="btn">Export <span aria-hidden="true">▾</span></summary>
+        <div class="dropdown-menu" role="menu">
+            <a role="menuitem" asp-controller="@ctrl" asp-action="Export">
+                <span class="dropdown-label">Download JSON</span>
+                <span class="dropdown-sub dim">@Model.EntityLabelPlural in one file</span>
+            </a>
+            @if (Model.SupportsIncludeSecrets)
+            {
+                <a role="menuitem" asp-controller="@ctrl" asp-action="Export" asp-route-includeSecrets="true">
+                    <span class="dropdown-label">Download JSON <span class="badge-warn">with secrets</span></span>
+                    <span class="dropdown-sub dim">Real values included &mdash; treat as sensitive</span>
+                </a>
+            }
+        </div>
+    </details>
+    <button type="button" class="btn btn-ghost" data-open-dialog="@dlgId">Import&hellip;</button>
+</section>
+
+@if (warnings.Count > 0)
+{
+    <details class="io-warnings" open>
+        <summary>@warnings.Count import warning@(warnings.Count == 1 ? "" : "s")</summary>
+        <ul>
+            @foreach (var w in warnings) { <li>@w</li> }
+        </ul>
+    </details>
+}
+
+<dialog id="@dlgId" class="import-dlg">
+    <form method="post" asp-controller="@ctrl" asp-action="Import" enctype="multipart/form-data">
+        @Html.AntiForgeryToken()
+        <header>
+            <h2>Import @Model.EntityLabelPlural</h2>
+            <button type="button" class="dlg-close" data-close-dialog aria-label="Close">&times;</button>
+        </header>
+        <p class="dim">Existing @Model.EntityLabelPlural with the same name are updated in place; new ones are created. Foreign references use names so files are portable across machines.</p>
+
+        <label class="io-field">
+            <span class="io-label">Upload a JSON file</span>
+            <input type="file" name="file" accept=".json,application/json" />
+        </label>
+
+        <div class="io-or" aria-hidden="true">or</div>
+
+        <label class="io-field">
+            <span class="io-label">Paste JSON</span>
+            <textarea name="json" rows="9" spellcheck="false" placeholder='{ "schemaVersion": 1, "@Model.EntityLabelPlural": [ … ] }'></textarea>
+        </label>
+
+        <menu class="dlg-actions">
+            <button type="button" class="btn btn-ghost" data-close-dialog>Cancel</button>
+            <button type="submit" class="btn btn-primary">Import</button>
+        </menu>
+    </form>
+</dialog>
+
+<script>
+    (function () {
+        document.querySelectorAll('[data-open-dialog]').forEach(function (b) {
+            b.addEventListener('click', function () {
+                var dlg = document.getElementById(b.getAttribute('data-open-dialog'));
+                if (dlg && typeof dlg.showModal === 'function') dlg.showModal();
+                else if (dlg) dlg.setAttribute('open', '');
+            });
+        });
+        document.querySelectorAll('[data-close-dialog]').forEach(function (b) {
+            b.addEventListener('click', function () {
+                var dlg = b.closest('dialog');
+                if (dlg && typeof dlg.close === 'function') dlg.close();
+                else if (dlg) dlg.removeAttribute('open');
+            });
+        });
+    })();
+</script>

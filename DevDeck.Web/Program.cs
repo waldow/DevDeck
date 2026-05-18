@@ -3,6 +3,7 @@ using DevDeck.Web.Options;
 using DevDeck.Web.Services.Commands;
 using DevDeck.Web.Services.Health;
 using DevDeck.Web.Services.Logs;
+using DevDeck.Web.Services.Portability;
 using DevDeck.Web.Services.Proxy;
 using DevDeck.Web.Services.Runtime;
 using Microsoft.EntityFrameworkCore;
@@ -36,6 +37,8 @@ builder.Services.AddSingleton<ProxyRouteBuilder>();
 builder.Services.AddSingleton<ProxyRequestGuard>();
 builder.Services.AddSingleton<DevDeckProxyConfigProvider>();
 builder.Services.AddSingleton<IProxyConfigProvider>(sp => sp.GetRequiredService<DevDeckProxyConfigProvider>());
+builder.Services.AddSingleton<PortabilityExporter>();
+builder.Services.AddSingleton<PortabilityImporter>();
 builder.Services.AddHostedService<HealthCheckBackgroundService>();
 builder.Services.AddHostedService<AutoStartHostedService>();
 

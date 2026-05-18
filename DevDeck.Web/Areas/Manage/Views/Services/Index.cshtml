@@ -11,6 +11,14 @@
     <a class="btn btn-primary" asp-action="Create">+ New service</a>
 }
 
+@await Html.PartialAsync("_ImportExportToolbar", new DevDeck.Web.Areas.Manage.ViewModels.ImportExportToolbarModel
+{
+    ControllerName = "Services",
+    EntityLabelSingular = "service",
+    EntityLabelPlural = "services",
+    SupportsIncludeSecrets = true,
+})
+
 <section class="section">
     <div class="section-title">Quick add from preset</div>
     <div class="preset-grid">
@@ -65,6 +73,7 @@ else
                             }
                             <a class="btn" asp-action="Edit" asp-route-id="@s.Id">Edit</a>
                             <a class="btn btn-ghost" asp-area="Manage" asp-controller="Logs" asp-action="ServiceLogs" asp-route-id="@s.Id">Logs</a>
+                            <a class="btn btn-ghost" asp-action="ExportOne" asp-route-id="@s.Id" title="Download this service as JSON">Export</a>
                             <form class="inline" method="post" asp-action="Delete" asp-route-id="@s.Id" onsubmit="return confirm('Delete this service?');">@Html.AntiForgeryToken()<button class="btn btn-danger" type="submit">Delete</button></form>
                         </div>
                     </td>

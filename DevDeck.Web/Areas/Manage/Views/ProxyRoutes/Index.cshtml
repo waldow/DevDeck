@@ -12,6 +12,14 @@
     <a class="btn btn-primary" asp-action="Create">+ New route</a>
 }
 
+@await Html.PartialAsync("_ImportExportToolbar", new DevDeck.Web.Areas.Manage.ViewModels.ImportExportToolbarModel
+{
+    ControllerName = "ProxyRoutes",
+    EntityLabelSingular = "route",
+    EntityLabelPlural = "routes",
+    SupportsIncludeSecrets = false,
+})
+
 @if (warnings.Count > 0)
 {
     <div class="flash error">
@@ -56,6 +64,7 @@ else
                                 <form class="inline" method="post" asp-action="Enable" asp-route-id="@r.Id">@Html.AntiForgeryToken()<button class="btn btn-ok" type="submit">Enable</button></form>
                             }
                             <a class="btn" asp-action="Edit" asp-route-id="@r.Id">Edit</a>
+                            <a class="btn btn-ghost" asp-action="ExportOne" asp-route-id="@r.Id" title="Download this route as JSON">Export</a>
                             <form class="inline" method="post" asp-action="Delete" asp-route-id="@r.Id" onsubmit="return confirm('Delete this proxy route?');">@Html.AntiForgeryToken()<button class="btn btn-danger" type="submit">Delete</button></form>
                         </div>
                     </td>

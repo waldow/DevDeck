@@ -1,8 +1,11 @@
+using System.Text;
+using System.Text.Json;
 using DevDeck.Web.Areas.Manage.ViewModels;
 using DevDeck.Web.Data;
 using DevDeck.Web.Data.Entities;
 using DevDeck.Web.Options;
 using DevDeck.Web.Services.Health;
+using DevDeck.Web.Services.Portability;
 using DevDeck.Web.Services.Proxy;
 using DevDeck.Web.Services.Runtime;
 using Microsoft.AspNetCore.Mvc;
@@ -22,13 +25,18 @@ public sealed class ProxyRoutesController : Controller
     private readonly IDevDeckProcessManager _manager;
     private readonly IOptions<DevDeckOptions> _options;
 
+    private readonly PortabilityExporter _exporter;
+    private readonly PortabilityImporter _importer;
+
     public ProxyRoutesController(
         IDbContextFactory<DevDeckDbContext> dbFactory,
         DevDeckProxyConfigProvider provider,
         ProxyDestinationValidator validator,
         PortProbeService portProbe,
         IDevDeckProcessManager manager,
-        IOptions<DevDeckOptions> options)
+        IOptions<DevDeckOptions> options,
+        PortabilityExporter exporter,
+        PortabilityImporter importer)
     {
         _dbFactory = dbFactory;
         _provider = provider;
@@ -36,6 +44,8 @@ public sealed class ProxyRoutesController : Controller
         _portProbe = portProbe;
         _manager = manager;
         _options = options;
+        _exporter = exporter;
+        _importer = importer;
     }
 
     [HttpGet("")]
@@ -247,6 +257,69 @@ public sealed class ProxyRoutesController : Controller
         }
 
         return View(vm);
+    }
+
+    [HttpGet("Export")]
+    public async Task<IActionResult> Export(CancellationToken cancellationToken)
+    {
+        var bundle = await _exporter.ExportRoutesAsync(singleId: null, cancellationToken);
+        return JsonDownload(bundle, $"devdeck-routes-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.json");
+    }
+
+    [HttpGet("Export/{id:int}")]
+    public async Task<IActionResult> ExportOne(int id, CancellationToken cancellationToken)
+    {
+        var bundle = await _exporter.ExportRoutesAsync(singleId: id, cancellationToken);
+        if (bundle.Routes.Count == 0) return NotFound();
+        return JsonDownload(bundle, $"devdeck-route-{Slugify(bundle.Routes[0].Name)}.json");
+    }
+
+    [HttpPost("Import")]
+    [ValidateAntiForgeryToken]
+    [RequestSizeLimit(4_000_000)]
+    public async Task<IActionResult> Import(IFormFile? file, string? json, CancellationToken cancellationToken)
+    {
+        var payload = await ReadPayloadAsync(file, json, cancellationToken);
+        if (payload is null)
+        {
+            TempData["Error"] = "No JSON provided. Pick a file or paste JSON into the dialog.";
+            return RedirectToAction(nameof(Index));
+        }
+
+        var result = await _importer.ImportRoutesAsync(payload, cancellationToken);
+        if (result.TotalAffected > 0)
+        {
+            await _provider.ReloadAsync();
+        }
+        TempData[result.HasErrors ? "Error" : "Info"] = result.ToFlashMessage();
+        TempData["ImportWarnings"] = JsonSerializer.Serialize(result.Warnings.Concat(result.Errors).ToList());
+        return RedirectToAction(nameof(Index));
+    }
+
+    private FileContentResult JsonDownload(object bundle, string fileName)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(bundle, bundle.GetType(), PortabilityJson.Options);
+        return File(bytes, "application/json", fileName);
+    }
+
+    private static async Task<string?> ReadPayloadAsync(IFormFile? file, string? json, CancellationToken cancellationToken)
+    {
+        if (file is { Length: > 0 })
+        {
+            using var reader = new StreamReader(file.OpenReadStream(), Encoding.UTF8);
+            return await reader.ReadToEndAsync(cancellationToken);
+        }
+        return string.IsNullOrWhiteSpace(json) ? null : json;
+    }
+
+    private static string Slugify(string name)
+    {
+        var clean = new StringBuilder(name.Length);
+        foreach (var ch in name.ToLowerInvariant())
+        {
+            clean.Append(char.IsLetterOrDigit(ch) ? ch : '-');
+        }
+        return clean.ToString().Trim('-');
     }
 
     private async Task<IActionResult> SetEnabledAsync(int id, bool enabled)

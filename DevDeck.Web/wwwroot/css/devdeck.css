@@ -198,3 +198,93 @@ legend { color: var(--text-dim); padding: 0 8px; font-size: 12px; letter-spacing
 .kv dd { margin: 0; word-break: break-all; }
 
 hr { border: 0; border-top: 1px solid var(--border-soft); margin: 18px 0; }
+
+/* ---------------------------------------------------------------- */
+/* Import / Export                                                  */
+/* ---------------------------------------------------------------- */
+.io-toolbar {
+    display: flex; justify-content: flex-end; align-items: center; gap: 8px;
+    margin: 0 0 18px 0; flex-wrap: wrap;
+}
+
+/* CSS-only dropdown via <details> */
+.io-toolbar .dropdown { position: relative; }
+.io-toolbar .dropdown > summary {
+    list-style: none; cursor: pointer; user-select: none;
+}
+.io-toolbar .dropdown > summary::-webkit-details-marker { display: none; }
+.io-toolbar .dropdown > summary::marker { content: ""; }
+.io-toolbar .dropdown[open] > summary {
+    background: var(--bg-elev-3); border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+}
+.io-toolbar .dropdown-menu {
+    position: absolute; right: 0; top: calc(100% + 6px); z-index: 30;
+    min-width: 280px; background: var(--bg-elev-2);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: 0 12px 32px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.02) inset;
+    padding: 6px; display: grid; gap: 2px;
+}
+.io-toolbar .dropdown-menu a {
+    display: grid; gap: 2px; padding: 9px 12px;
+    border-radius: var(--radius-sm); color: var(--text);
+}
+.io-toolbar .dropdown-menu a:hover { background: var(--bg-elev-3); }
+.io-toolbar .dropdown-label { font-size: 13px; }
+.io-toolbar .dropdown-sub { font-size: 11px; }
+.io-toolbar .badge-warn {
+    display: inline-block; margin-left: 4px; padding: 1px 6px; font-size: 10px;
+    letter-spacing: 0.4px; text-transform: uppercase;
+    color: var(--warn); background: var(--warn-bg);
+    border: 1px solid rgba(251,191,36,0.35); border-radius: 999px;
+    font-family: var(--mono);
+}
+
+/* Inline warnings surfaced after an import */
+.io-warnings {
+    background: var(--warn-bg); border: 1px solid rgba(251,191,36,0.35);
+    border-radius: var(--radius); padding: 10px 14px; margin: 0 0 18px 0;
+    color: #ffeac1;
+}
+.io-warnings summary { cursor: pointer; font-size: 13px; }
+.io-warnings ul { margin: 8px 0 0 22px; padding: 0; font-size: 12.5px; }
+.io-warnings li + li { margin-top: 3px; }
+
+/* Native <dialog> for paste-or-upload */
+dialog.import-dlg {
+    width: min(560px, 92vw); padding: 0; border: 1px solid var(--border);
+    border-radius: var(--radius); background: var(--bg-elev-1); color: var(--text);
+    box-shadow: 0 24px 60px rgba(0,0,0,0.6);
+}
+dialog.import-dlg::backdrop { background: rgba(4,6,10,0.62); backdrop-filter: blur(2px); }
+dialog.import-dlg form { padding: 18px 20px 16px 20px; display: grid; gap: 12px; }
+dialog.import-dlg header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+dialog.import-dlg h2 { margin: 0; font-size: 16px; letter-spacing: 0.4px; }
+dialog.import-dlg .dlg-close {
+    background: transparent; border: 0; color: var(--text-mute); font-size: 22px; line-height: 1;
+    cursor: pointer; padding: 0 4px; border-radius: var(--radius-sm);
+}
+dialog.import-dlg .dlg-close:hover { color: var(--text); background: var(--bg-elev-3); }
+dialog.import-dlg p { margin: 0; font-size: 12.5px; }
+.io-field { display: grid; gap: 4px; }
+.io-field .io-label { font-size: 12px; color: var(--text-dim); letter-spacing: 0.4px; text-transform: uppercase; }
+.io-field input[type=file] {
+    background: var(--bg-elev-2); border: 1px dashed var(--border); padding: 12px;
+    border-radius: var(--radius-sm); color: var(--text-dim); font-size: 12.5px;
+}
+.io-field textarea { font-family: var(--mono); font-size: 12.5px; resize: vertical; min-height: 140px; }
+.io-or {
+    text-align: center; font-size: 11px; letter-spacing: 1px; text-transform: uppercase;
+    color: var(--text-mute); position: relative;
+}
+.io-or::before, .io-or::after {
+    content: ""; position: absolute; top: 50%; width: calc(50% - 22px);
+    border-top: 1px solid var(--border-soft);
+}
+.io-or::before { left: 0; }
+.io-or::after { right: 0; }
+.dlg-actions {
+    display: flex; justify-content: flex-end; gap: 8px; margin: 6px 0 0 0;
+    padding: 12px 0 0 0; border-top: 1px solid var(--border-soft);
+    list-style: none;
+}

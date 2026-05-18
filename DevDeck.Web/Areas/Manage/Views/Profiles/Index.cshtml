@@ -9,6 +9,14 @@
     <a class="btn btn-primary" asp-action="Create">+ New profile</a>
 }
 
+@await Html.PartialAsync("_ImportExportToolbar", new DevDeck.Web.Areas.Manage.ViewModels.ImportExportToolbarModel
+{
+    ControllerName = "Profiles",
+    EntityLabelSingular = "profile",
+    EntityLabelPlural = "profiles",
+    SupportsIncludeSecrets = false,
+})
+
 @if (Model.Count == 0)
 {
     <div class="empty">No profiles yet — create one to start multiple services at once.</div>
@@ -31,6 +39,7 @@ else
                             <form class="inline" method="post" asp-action="Start" asp-route-id="@p.Id">@Html.AntiForgeryToken()<button class="btn btn-ok" type="submit">Start</button></form>
                             <form class="inline" method="post" asp-action="Stop" asp-route-id="@p.Id">@Html.AntiForgeryToken()<button class="btn btn-warn" type="submit">Stop</button></form>
                             <a class="btn" asp-action="Edit" asp-route-id="@p.Id">Edit</a>
+                            <a class="btn btn-ghost" asp-action="ExportOne" asp-route-id="@p.Id" title="Download this profile as JSON">Export</a>
                             <form class="inline" method="post" asp-action="Delete" asp-route-id="@p.Id" onsubmit="return confirm('Delete this profile?');">@Html.AntiForgeryToken()<button class="btn btn-danger" type="submit">Delete</button></form>
                         </div>
                     </td>
