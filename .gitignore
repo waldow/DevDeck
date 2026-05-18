@@ -6,6 +6,8 @@
 [Oo]ut/
 [Ll]og/
 [Ll]ogs/
+!DevDeck.Web/Services/Logs/
+!DevDeck.Web/Services/Logs/**
 build/
 publish/
 
