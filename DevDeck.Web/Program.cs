@@ -16,6 +16,7 @@ builder.WebHost.UseUrls("http://localhost:5050");
 builder.Services.Configure<DevDeckOptions>(builder.Configuration.GetSection(DevDeckOptions.SectionName));
 
 builder.Services.AddControllersWithViews();
+builder.Services.AddAuthorization();
 builder.Services.AddHttpClient();
 
 builder.Services.AddDbContextFactory<DevDeckDbContext>(options =>
@@ -26,11 +27,13 @@ builder.Services.AddSingleton<CommandTemplateRenderer>();
 builder.Services.AddSingleton<CommandPresetProvider>();
 builder.Services.AddSingleton<LogFileWriter>();
 builder.Services.AddSingleton<ProcessLogBuffer>();
+builder.Services.AddSingleton<HealthStatusCache>();
 builder.Services.AddSingleton<DevDeckProcessManager>();
 builder.Services.AddSingleton<IDevDeckProcessManager>(sp => sp.GetRequiredService<DevDeckProcessManager>());
 builder.Services.AddSingleton<PortProbeService>();
 builder.Services.AddSingleton<ProxyDestinationValidator>();
 builder.Services.AddSingleton<ProxyRouteBuilder>();
+builder.Services.AddSingleton<ProxyRequestGuard>();
 builder.Services.AddSingleton<DevDeckProxyConfigProvider>();
 builder.Services.AddSingleton<IProxyConfigProvider>(sp => sp.GetRequiredService<DevDeckProxyConfigProvider>());
 builder.Services.AddHostedService<HealthCheckBackgroundService>();
@@ -53,6 +56,26 @@ using (var scope = app.Services.CreateScope())
 app.UseStaticFiles();
 app.UseRouting();
 
+var devDeckOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<DevDeckOptions>>().Value;
+if (devDeckOptions.DevelopmentOnly && !app.Environment.IsDevelopment())
+{
+    app.Use(async (context, next) =>
+    {
+        var path = context.Request.Path.Value ?? string.Empty;
+        if (path.Equals("/Manage", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("/Manage/", StringComparison.OrdinalIgnoreCase))
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            await context.Response.WriteAsync("DevDeck management is only available in Development.");
+            return;
+        }
+
+        await next();
+    });
+}
+
+app.UseAuthorization();
+
 app.MapControllerRoute(
     name: "areas",
     pattern: "{area:exists}/{controller=Dashboard}/{action=Index}/{id?}");
@@ -62,7 +85,20 @@ app.MapControllerRoute(
     pattern: "{controller=Home}/{action=Index}/{id?}");
 
 // Important: reverse proxy routes are mapped AFTER MVC routes so /Manage always wins.
-app.MapReverseProxy();
+if (devDeckOptions.ReverseProxy.Enabled)
+{
+    app.MapReverseProxy(proxyPipeline =>
+    {
+        proxyPipeline.Use(async (context, next) =>
+        {
+            var guard = context.RequestServices.GetRequiredService<ProxyRequestGuard>();
+            if (await guard.AllowRequestAsync(context))
+            {
+                await next();
+            }
+        });
+    });
+}
 
 app.Run();
 

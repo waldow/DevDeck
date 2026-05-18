@@ -57,6 +57,7 @@ public sealed class ProxyRouteBuilder
                 },
                 Transforms = BuildTransforms(route),
                 AuthorizationPolicy = string.IsNullOrWhiteSpace(route.AuthorizationPolicy) ? null : route.AuthorizationPolicy,
+                Metadata = BuildMetadata(route),
             };
 
             var clusterConfig = new ClusterConfig
@@ -135,6 +136,23 @@ public sealed class ProxyRouteBuilder
     private static string NormalizeDestination(string url)
     {
         return url.EndsWith('/') ? url : url + "/";
+    }
+
+    private static IReadOnlyDictionary<string, string> BuildMetadata(ProxyRoute route)
+    {
+        var metadata = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["DevDeck.RouteId"] = route.Id.ToString(),
+            ["DevDeck.AutoStartService"] = route.AutoStartService.ToString(),
+            ["DevDeck.RequireHealthyDestination"] = route.RequireHealthyDestination.ToString(),
+        };
+
+        if (route.DevServiceId is int serviceId)
+        {
+            metadata["DevDeck.ServiceId"] = serviceId.ToString();
+        }
+
+        return metadata;
     }
 }
 

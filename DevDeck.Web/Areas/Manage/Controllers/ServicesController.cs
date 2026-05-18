@@ -141,7 +141,13 @@ public sealed class ServicesController : Controller
             AutoStart = entity.AutoStart,
             DisplayOrder = entity.DisplayOrder,
             EnvironmentVariables = entity.EnvironmentVariables
-                .Select(e => new EnvVarEditRow { Id = e.Id, Key = e.Key, Value = e.Value, IsSecret = e.IsSecret })
+                .Select(e => new EnvVarEditRow
+                {
+                    Id = e.Id,
+                    Key = e.Key,
+                    Value = e.IsSecret ? EnvVarEditRow.SecretPlaceholder : e.Value,
+                    IsSecret = e.IsSecret,
+                })
                 .ToList(),
             HealthChecks = entity.HealthChecks
                 .Select(h => new HealthCheckEditRow
@@ -332,7 +338,10 @@ public sealed class ServicesController : Controller
                 if (existing is not null)
                 {
                     existing.Key = row.Key;
-                    existing.Value = row.Value ?? string.Empty;
+                    if (row.Value != EnvVarEditRow.SecretPlaceholder)
+                    {
+                        existing.Value = row.Value ?? string.Empty;
+                    }
                     existing.IsSecret = row.IsSecret;
                 }
             }

@@ -13,12 +13,14 @@ namespace DevDeck.Web.Services.Runtime;
 public sealed class DevDeckProcessManager : IDevDeckProcessManager
 {
     private readonly ConcurrentDictionary<int, RunningProcessInfo> _running = new();
+    private readonly ConcurrentDictionary<int, SemaphoreSlim> _serviceLocks = new();
     private readonly IDbContextFactory<DevDeckDbContext> _dbFactory;
     private readonly ProcessLogBuffer _logBuffer;
     private readonly LogFileWriter _logFileWriter;
     private readonly CommandTemplateRenderer _renderer;
     private readonly CommandExecutableResolver _resolver;
     private readonly IOptionsMonitor<DevDeckOptions> _options;
+    private readonly IWebHostEnvironment _environment;
     private readonly ILogger<DevDeckProcessManager> _logger;
 
     public DevDeckProcessManager(
@@ -28,6 +30,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
         CommandTemplateRenderer renderer,
         CommandExecutableResolver resolver,
         IOptionsMonitor<DevDeckOptions> options,
+        IWebHostEnvironment environment,
         ILogger<DevDeckProcessManager> logger)
     {
         _dbFactory = dbFactory;
@@ -36,6 +39,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
         _renderer = renderer;
         _resolver = resolver;
         _options = options;
+        _environment = environment;
         _logger = logger;
     }
 
@@ -50,183 +54,225 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
 
     public async Task<StartServiceResult> StartServiceAsync(int serviceId, CancellationToken cancellationToken)
     {
-        if (_running.ContainsKey(serviceId))
+        if (!ExecutionAllowed())
         {
-            return new StartServiceResult { ServiceId = serviceId, Success = false, Error = "Service is already running." };
+            return new StartServiceResult { ServiceId = serviceId, Success = false, Error = "DevDeck service execution is only enabled in Development." };
         }
 
-        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
-        var service = await db.DevServices
-            .Include(s => s.EnvironmentVariables)
-            .FirstOrDefaultAsync(s => s.Id == serviceId, cancellationToken);
-
-        if (service is null)
-        {
-            return new StartServiceResult { ServiceId = serviceId, Success = false, Error = "Service not found." };
-        }
-        if (!service.Enabled)
-        {
-            return new StartServiceResult { ServiceId = serviceId, Success = false, Error = "Service is disabled." };
-        }
-        if (!Directory.Exists(service.WorkingDirectory))
-        {
-            return new StartServiceResult { ServiceId = serviceId, Success = false, Error = $"Working directory does not exist: {service.WorkingDirectory}" };
-        }
-
-        var values = CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.Port, service.WorkingDirectory);
-        var argsRender = _renderer.Render(service.StartArguments, values);
-        var resolvedCommand = _resolver.Resolve(service.StartCommand);
-
-        var run = new ServiceRun
-        {
-            DevServiceId = service.Id,
-            StartedUtc = DateTimeOffset.UtcNow,
-            Status = ProcessStatusNames.Starting,
-            StartCommandSnapshot = resolvedCommand,
-            StartArgumentsSnapshot = argsRender.Text,
-            WorkingDirectorySnapshot = service.WorkingDirectory,
-        };
-        db.ServiceRuns.Add(run);
-        await db.SaveChangesAsync(cancellationToken);
-
-        var logPath = DevDeckPaths.LogFilePathFor(service.Name, run.Id, run.StartedUtc);
-        run.LogFilePath = logPath;
-        await db.SaveChangesAsync(cancellationToken);
-
-        var psi = new ProcessStartInfo
-        {
-            FileName = resolvedCommand,
-            Arguments = argsRender.Text,
-            WorkingDirectory = service.WorkingDirectory,
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            RedirectStandardInput = true,
-            CreateNoWindow = true,
-        };
-
-        foreach (var env in service.EnvironmentVariables)
-        {
-            var rendered = _renderer.Render(env.Value, values).Text;
-            psi.EnvironmentVariables[env.Key] = rendered;
-        }
-
-        Process process;
+        var serviceLock = _serviceLocks.GetOrAdd(serviceId, _ => new SemaphoreSlim(1, 1));
+        await serviceLock.WaitAsync(cancellationToken);
         try
         {
-            process = new Process { StartInfo = psi, EnableRaisingEvents = true };
-            process.Start();
-        }
-        catch (Exception ex)
-        {
-            run.Status = ProcessStatusNames.FailedToStart;
-            run.StoppedUtc = DateTimeOffset.UtcNow;
-            run.LastError = ex.Message;
+            if (_running.ContainsKey(serviceId))
+            {
+                return new StartServiceResult { ServiceId = serviceId, Success = false, Error = "Service is already running." };
+            }
+
+            await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+            var service = await db.DevServices
+                .Include(s => s.EnvironmentVariables)
+                .FirstOrDefaultAsync(s => s.Id == serviceId, cancellationToken);
+
+            if (service is null)
+            {
+                return new StartServiceResult { ServiceId = serviceId, Success = false, Error = "Service not found." };
+            }
+            if (!service.Enabled)
+            {
+                return new StartServiceResult { ServiceId = serviceId, Success = false, Error = "Service is disabled." };
+            }
+            if (!Directory.Exists(service.WorkingDirectory))
+            {
+                return new StartServiceResult { ServiceId = serviceId, Success = false, Error = $"Working directory does not exist: {service.WorkingDirectory}" };
+            }
+
+            var values = CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.Port, service.WorkingDirectory);
+            var argsRender = _renderer.Render(service.StartArguments, values);
+            var resolvedCommand = _resolver.Resolve(service.StartCommand);
+
+            var run = new ServiceRun
+            {
+                DevServiceId = service.Id,
+                StartedUtc = DateTimeOffset.UtcNow,
+                Status = ProcessStatusNames.Starting,
+                StartCommandSnapshot = resolvedCommand,
+                StartArgumentsSnapshot = argsRender.Text,
+                WorkingDirectorySnapshot = service.WorkingDirectory,
+            };
+            db.ServiceRuns.Add(run);
             await db.SaveChangesAsync(cancellationToken);
-            AppendSystemLine(service.Id, run.Id, logPath, $"Failed to start: {ex.Message}");
-            return new StartServiceResult { ServiceId = serviceId, RunId = run.Id, Success = false, Error = ex.Message };
+
+            var logPath = DevDeckPaths.LogFilePathFor(service.Name, run.Id, run.StartedUtc);
+            run.LogFilePath = logPath;
+            await db.SaveChangesAsync(cancellationToken);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = resolvedCommand,
+                Arguments = argsRender.Text,
+                WorkingDirectory = service.WorkingDirectory,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                RedirectStandardInput = true,
+                CreateNoWindow = true,
+            };
+
+            foreach (var env in service.EnvironmentVariables)
+            {
+                var rendered = _renderer.Render(env.Value, values).Text;
+                psi.EnvironmentVariables[env.Key] = rendered;
+            }
+
+            var serviceIdLocal = service.Id;
+            var runIdLocal = run.Id;
+            var logPathLocal = logPath;
+
+            Process process;
+            RunningProcessInfo info;
+            try
+            {
+                process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+                process.OutputDataReceived += (_, e) =>
+                {
+                    if (e.Data is null) return;
+                    WriteLine(serviceIdLocal, runIdLocal, logPathLocal, "OUT", e.Data);
+                };
+                process.ErrorDataReceived += (_, e) =>
+                {
+                    if (e.Data is null) return;
+                    WriteLine(serviceIdLocal, runIdLocal, logPathLocal, "ERR", e.Data);
+                };
+                process.Exited += async (_, _) =>
+                {
+                    await HandleProcessExitedAsync(serviceIdLocal, runIdLocal, logPathLocal, process);
+                };
+
+                info = new RunningProcessInfo
+                {
+                    DevServiceId = service.Id,
+                    ServiceRunId = run.Id,
+                    ServiceName = service.Name,
+                    Process = process,
+                    StartedUtc = DateTimeOffset.UtcNow,
+                    LogFilePath = logPath,
+                    Port = service.Port,
+                    Url = service.Url,
+                    Status = ProcessStatus.Starting,
+                };
+                if (!_running.TryAdd(service.Id, info))
+                {
+                    return new StartServiceResult { ServiceId = service.Id, RunId = run.Id, Success = false, Error = "Service is already running." };
+                }
+
+                process.Start();
+            }
+            catch (Exception ex)
+            {
+                _running.TryRemove(service.Id, out _);
+                run.Status = ProcessStatusNames.FailedToStart;
+                run.StoppedUtc = DateTimeOffset.UtcNow;
+                run.LastError = ex.Message;
+                await db.SaveChangesAsync(cancellationToken);
+                AppendSystemLine(service.Id, run.Id, logPath, $"Failed to start: {ex.Message}");
+                return new StartServiceResult { ServiceId = serviceId, RunId = run.Id, Success = false, Error = ex.Message };
+            }
+
+            info.Status = ProcessStatus.Running;
+            run.Status = ProcessStatusNames.Running;
+            run.ProcessId = SafePid(process);
+            await db.SaveChangesAsync(cancellationToken);
+
+            try
+            {
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to begin stream read for service {ServiceId}", serviceIdLocal);
+            }
+
+            AppendSystemLine(service.Id, run.Id, logPath, $"Process started with PID {run.ProcessId}");
+            if (argsRender.UnknownPlaceholders.Count > 0)
+            {
+                AppendSystemLine(service.Id, run.Id, logPath,
+                    $"Unresolved placeholders in arguments: {string.Join(", ", argsRender.UnknownPlaceholders)}");
+            }
+
+            return new StartServiceResult
+            {
+                ServiceId = service.Id,
+                RunId = run.Id,
+                Success = true,
+                Message = $"Started PID {run.ProcessId}",
+            };
         }
-
-        var info = new RunningProcessInfo
+        finally
         {
-            DevServiceId = service.Id,
-            ServiceRunId = run.Id,
-            ServiceName = service.Name,
-            Process = process,
-            StartedUtc = DateTimeOffset.UtcNow,
-            LogFilePath = logPath,
-            Port = service.Port,
-            Url = service.Url,
-            Status = ProcessStatus.Running,
-        };
-        _running[service.Id] = info;
-
-        var serviceIdLocal = service.Id;
-        var runIdLocal = run.Id;
-        var logPathLocal = logPath;
-
-        process.OutputDataReceived += (_, e) =>
-        {
-            if (e.Data is null) return;
-            WriteLine(serviceIdLocal, runIdLocal, logPathLocal, "OUT", e.Data);
-        };
-        process.ErrorDataReceived += (_, e) =>
-        {
-            if (e.Data is null) return;
-            WriteLine(serviceIdLocal, runIdLocal, logPathLocal, "ERR", e.Data);
-        };
-        process.Exited += async (_, _) =>
-        {
-            await HandleProcessExitedAsync(serviceIdLocal, runIdLocal, logPathLocal, process);
-        };
-
-        try
-        {
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
+            serviceLock.Release();
         }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to begin stream read for service {ServiceId}", serviceIdLocal);
-        }
-
-        run.Status = ProcessStatusNames.Running;
-        run.ProcessId = SafePid(process);
-        await db.SaveChangesAsync(cancellationToken);
-
-        AppendSystemLine(service.Id, run.Id, logPath, $"Process started with PID {run.ProcessId}");
-        if (argsRender.UnknownPlaceholders.Count > 0)
-        {
-            AppendSystemLine(service.Id, run.Id, logPath,
-                $"Unresolved placeholders in arguments: {string.Join(", ", argsRender.UnknownPlaceholders)}");
-        }
-
-        return new StartServiceResult
-        {
-            ServiceId = service.Id,
-            RunId = run.Id,
-            Success = true,
-            Message = $"Started PID {run.ProcessId}",
-        };
     }
 
     public async Task<StopServiceResult> StopServiceAsync(int serviceId, CancellationToken cancellationToken)
     {
-        if (!_running.TryGetValue(serviceId, out var info))
+        if (!ExecutionAllowed())
         {
-            return new StopServiceResult { ServiceId = serviceId, Success = false, Error = "Service is not running." };
+            return new StopServiceResult { ServiceId = serviceId, Success = false, Error = "DevDeck service execution is only enabled in Development." };
         }
 
-        info.Status = ProcessStatus.Stopping;
-        AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, "Stop requested");
-
-        var timeout = TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.StopTimeoutSeconds));
-        var deadline = DateTime.UtcNow + timeout;
+        var serviceLock = _serviceLocks.GetOrAdd(serviceId, _ => new SemaphoreSlim(1, 1));
+        await serviceLock.WaitAsync(cancellationToken);
         try
         {
-            if (!info.Process.HasExited)
+            if (!_running.TryGetValue(serviceId, out var info))
             {
-                AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, "Killing process tree");
-                info.Process.Kill(entireProcessTree: true);
+                return new StopServiceResult { ServiceId = serviceId, Success = false, Error = "Service is not running." };
             }
 
-            while (!info.Process.HasExited && DateTime.UtcNow < deadline)
-            {
-                await Task.Delay(50, cancellationToken);
-            }
-        }
-        catch (Exception ex)
-        {
-            AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, $"Error stopping process: {ex.Message}");
-        }
+            info.Status = ProcessStatus.Stopping;
+            AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, "Stop requested");
+            await MarkRunStatusAsync(info.ServiceRunId, ProcessStatusNames.Stopping, cancellationToken);
 
-        return new StopServiceResult
+            var timeout = TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.StopTimeoutSeconds));
+            var exited = false;
+            try
+            {
+                if (!info.Process.HasExited)
+                {
+                    TryCloseMainWindow(info.Process);
+                    exited = await WaitForExitAsync(info.Process, timeout, cancellationToken);
+                }
+                else
+                {
+                    exited = true;
+                }
+
+                if (!exited && !info.Process.HasExited)
+                {
+                    info.KillIssued = true;
+                    AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, "Killing process tree");
+                    info.Process.Kill(entireProcessTree: true);
+                    exited = await WaitForExitAsync(info.Process, TimeSpan.FromSeconds(2), cancellationToken);
+                }
+            }
+            catch (Exception ex)
+            {
+                AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, $"Error stopping process: {ex.Message}");
+            }
+
+            return new StopServiceResult
+            {
+                ServiceId = serviceId,
+                RunId = info.ServiceRunId,
+                Success = exited || info.Process.HasExited,
+                Message = exited || info.Process.HasExited ? "Stopped" : "Timed out waiting for exit",
+            };
+        }
+        finally
         {
-            ServiceId = serviceId,
-            RunId = info.ServiceRunId,
-            Success = info.Process.HasExited,
-            Message = info.Process.HasExited ? "Stopped" : "Timed out waiting for exit",
-        };
+            serviceLock.Release();
+        }
     }
 
     public async Task<RestartServiceResult> RestartServiceAsync(int serviceId, CancellationToken cancellationToken)
@@ -321,7 +367,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
         int? exitCode = null;
         try { exitCode = process.ExitCode; } catch { /* ignore */ }
         AppendSystemLine(serviceId, runId, logPath, $"Process exited with code {exitCode?.ToString() ?? "?"}");
-        _running.TryRemove(serviceId, out _);
+        _running.TryRemove(serviceId, out var info);
         _logFileWriter.Close(logPath);
 
         try
@@ -334,7 +380,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
             run.ExitCode = exitCode;
             run.Status = run.Status switch
             {
-                ProcessStatusNames.Stopping => ProcessStatusNames.Killed,
+                ProcessStatusNames.Stopping => info?.KillIssued == true ? ProcessStatusNames.Killed : ProcessStatusNames.Stopped,
                 _ => exitCode is 0 ? ProcessStatusNames.Stopped : ProcessStatusNames.Crashed,
             };
             await db.SaveChangesAsync();
@@ -348,5 +394,56 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
     private static int? SafePid(Process p)
     {
         try { return p.Id; } catch { return null; }
+    }
+
+    private bool ExecutionAllowed() =>
+        !_options.CurrentValue.DevelopmentOnly || _environment.IsDevelopment();
+
+    private async Task MarkRunStatusAsync(long runId, string status, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+            var run = await db.ServiceRuns.FirstOrDefaultAsync(r => r.Id == runId, cancellationToken);
+            if (run is null) return;
+            run.Status = status;
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to mark ServiceRun {RunId} as {Status}", runId, status);
+        }
+    }
+
+    private static void TryCloseMainWindow(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.CloseMainWindow();
+            }
+        }
+        catch
+        {
+            // Some console processes do not expose a main window; kill fallback handles them.
+        }
+    }
+
+    private static async Task<bool> WaitForExitAsync(Process process, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken).WaitAsync(timeout, cancellationToken);
+            return true;
+        }
+        catch (TimeoutException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return true;
+        }
     }
 }

@@ -11,6 +11,7 @@ public sealed class RunningProcessInfo
     public required DateTimeOffset StartedUtc { get; init; }
     public required string LogFilePath { get; init; }
     public ProcessStatus Status { get; set; } = ProcessStatus.Starting;
+    public bool KillIssued { get; set; }
     public int? Port { get; init; }
     public string? Url { get; init; }
 }

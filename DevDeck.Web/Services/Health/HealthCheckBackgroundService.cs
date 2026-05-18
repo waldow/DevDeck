@@ -11,6 +11,7 @@ public sealed class HealthCheckBackgroundService : BackgroundService
     private readonly IDevDeckProcessManager _processManager;
     private readonly CommandTemplateRenderer _renderer;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly HealthStatusCache _healthStatusCache;
     private readonly ILogger<HealthCheckBackgroundService> _logger;
 
     public HealthCheckBackgroundService(
@@ -18,12 +19,14 @@ public sealed class HealthCheckBackgroundService : BackgroundService
         IDevDeckProcessManager processManager,
         CommandTemplateRenderer renderer,
         IHttpClientFactory httpClientFactory,
+        HealthStatusCache healthStatusCache,
         ILogger<HealthCheckBackgroundService> logger)
     {
         _dbFactory = dbFactory;
         _processManager = processManager;
         _renderer = renderer;
         _httpClientFactory = httpClientFactory;
+        _healthStatusCache = healthStatusCache;
         _logger = logger;
     }
 
@@ -78,6 +81,7 @@ public sealed class HealthCheckBackgroundService : BackgroundService
                 check.LastStatus = HealthStatusNames.NotRunning;
                 check.LastStatusCode = null;
                 check.LastError = null;
+                _healthStatusCache.Set(service.Id, check.LastStatus);
                 continue;
             }
 
@@ -93,18 +97,21 @@ public sealed class HealthCheckBackgroundService : BackgroundService
                     ? HealthStatusNames.Healthy
                     : HealthStatusNames.Unhealthy;
                 check.LastError = null;
+                _healthStatusCache.Set(service.Id, check.LastStatus);
             }
             catch (TaskCanceledException)
             {
                 check.LastStatus = HealthStatusNames.Timeout;
                 check.LastStatusCode = null;
                 check.LastError = "Timed out";
+                _healthStatusCache.Set(service.Id, check.LastStatus);
             }
             catch (Exception ex)
             {
                 check.LastStatus = HealthStatusNames.Unhealthy;
                 check.LastStatusCode = null;
                 check.LastError = ex.Message;
+                _healthStatusCache.Set(service.Id, check.LastStatus);
             }
         }
 

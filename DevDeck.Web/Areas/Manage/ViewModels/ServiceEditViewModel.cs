@@ -33,6 +33,8 @@ public sealed class ServiceEditViewModel
 
 public sealed class EnvVarEditRow
 {
+    public const string SecretPlaceholder = "********";
+
     public int Id { get; set; }
     public string Key { get; set; } = string.Empty;
     public string Value { get; set; } = string.Empty;

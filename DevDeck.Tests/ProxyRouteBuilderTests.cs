@@ -109,6 +109,35 @@ public sealed class ProxyRouteBuilderTests
         result.Clusters.Should().ContainSingle();
     }
 
+    [Fact]
+    public void Build_adds_devdeck_metadata_for_linked_service_routes()
+    {
+        var routes = new[]
+        {
+            new ProxyRoute
+            {
+                Id = 42,
+                Name = "Good",
+                Enabled = true,
+                DevServiceId = 7,
+                MatchPath = "/app/{**catch-all}",
+                PathTransformMode = "None",
+                DestinationUrlOverride = "http://localhost:5173/",
+                AutoStartService = true,
+                RequireHealthyDestination = true,
+            },
+        };
+
+        var result = _builder.Build(routes);
+
+        result.Routes.Should().ContainSingle();
+        var metadata = result.Routes[0].Metadata;
+        metadata.Should().NotBeNull();
+        metadata!["DevDeck.ServiceId"].Should().Be("7");
+        metadata["DevDeck.AutoStartService"].Should().Be("True");
+        metadata["DevDeck.RequireHealthyDestination"].Should().Be("True");
+    }
+
     private static ProxyRoute NewRoute(string mode, string? removePrefix = null, string? addPrefix = null, string? pathSet = null) => new()
     {
         Name = "r",
