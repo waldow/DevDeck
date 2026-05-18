@@ -1,0 +1,42 @@
+@model List<LaunchProfile>
+@{
+    ViewData["Title"] = "Profiles — DevDeck";
+    ViewData["PageTitle"] = "Launch profiles";
+    ViewData["Crumb"] = "Grouped service starts";
+}
+
+@section Actions {
+    <a class="btn btn-primary" asp-action="Create">+ New profile</a>
+}
+
+@if (Model.Count == 0)
+{
+    <div class="empty">No profiles yet — create one to start multiple services at once.</div>
+}
+else
+{
+    <div class="table-wrap">
+        <table class="tbl">
+            <thead><tr><th>Name</th><th>Description</th><th>Services</th><th>Default</th><th></th></tr></thead>
+            <tbody>
+            @foreach (var p in Model)
+            {
+                <tr>
+                    <td><strong>@p.Name</strong></td>
+                    <td class="dim">@p.Description</td>
+                    <td class="mono">@p.Services.Count</td>
+                    <td>@(p.IsDefault ? "Yes" : "")</td>
+                    <td>
+                        <div class="btn-row">
+                            <form class="inline" method="post" asp-action="Start" asp-route-id="@p.Id">@Html.AntiForgeryToken()<button class="btn btn-ok" type="submit">Start</button></form>
+                            <form class="inline" method="post" asp-action="Stop" asp-route-id="@p.Id">@Html.AntiForgeryToken()<button class="btn btn-warn" type="submit">Stop</button></form>
+                            <a class="btn" asp-action="Edit" asp-route-id="@p.Id">Edit</a>
+                            <form class="inline" method="post" asp-action="Delete" asp-route-id="@p.Id" onsubmit="return confirm('Delete this profile?');">@Html.AntiForgeryToken()<button class="btn btn-danger" type="submit">Delete</button></form>
+                        </div>
+                    </td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    </div>
+}

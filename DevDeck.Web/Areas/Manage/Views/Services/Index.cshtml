@@ -1,0 +1,76 @@
+@model List<DevService>
+@{
+    ViewData["Title"] = "Services — DevDeck";
+    ViewData["PageTitle"] = "Services";
+    ViewData["Crumb"] = "Configured services";
+    var presets = (ViewBag.Presets as IReadOnlyList<CommandPreset>) ?? new List<CommandPreset>();
+    var running = (ViewBag.RunningIds as HashSet<int>) ?? new HashSet<int>();
+}
+
+@section Actions {
+    <a class="btn btn-primary" asp-action="Create">+ New service</a>
+}
+
+<section class="section">
+    <div class="section-title">Quick add from preset</div>
+    <div class="preset-grid">
+        @foreach (var p in presets)
+        {
+            <a class="preset-card" asp-action="Create" asp-route-preset="@p.Key">
+                <div class="preset-mark">@p.Key</div>
+                <div class="preset-name">@p.DisplayName</div>
+            </a>
+        }
+    </div>
+</section>
+
+@if (Model.Count == 0)
+{
+    <div class="empty">No services yet — pick a preset above to start.</div>
+}
+else
+{
+    <div class="table-wrap">
+        <table class="tbl">
+            <thead>
+                <tr><th>Name</th><th>Type</th><th>Working dir</th><th>Port</th><th>Status</th><th style="width:1%">Actions</th></tr>
+            </thead>
+            <tbody>
+            @foreach (var s in Model)
+            {
+                var isRunning = running.Contains(s.Id);
+                <tr>
+                    <td>
+                        <a asp-action="Details" asp-route-id="@s.Id"><strong>@s.Name</strong></a>
+                        @if (!s.Enabled) { <span class="pill pill-stopped" style="margin-left:6px">disabled</span> }
+                        @if (s.AutoStart) { <span class="pill pill-info" style="margin-left:6px">auto</span> }
+                    </td>
+                    <td class="mono">@s.ServiceType</td>
+                    <td class="mono dim" title="@s.WorkingDirectory">@System.IO.Path.GetFileName(s.WorkingDirectory.TrimEnd('/', '\\'))</td>
+                    <td class="mono">@(s.Port?.ToString() ?? "—")</td>
+                    <td>
+                        @if (isRunning) { <span class="pill pill-running">Running</span> }
+                        else { <span class="pill pill-stopped">Stopped</span> }
+                    </td>
+                    <td>
+                        <div class="btn-row">
+                            @if (isRunning)
+                            {
+                                <form class="inline" method="post" asp-action="Stop" asp-route-id="@s.Id">@Html.AntiForgeryToken()<button class="btn btn-warn" type="submit">Stop</button></form>
+                                <form class="inline" method="post" asp-action="Restart" asp-route-id="@s.Id">@Html.AntiForgeryToken()<button class="btn" type="submit">Restart</button></form>
+                            }
+                            else
+                            {
+                                <form class="inline" method="post" asp-action="Start" asp-route-id="@s.Id">@Html.AntiForgeryToken()<button class="btn btn-ok" type="submit">Start</button></form>
+                            }
+                            <a class="btn" asp-action="Edit" asp-route-id="@s.Id">Edit</a>
+                            <a class="btn btn-ghost" asp-area="Manage" asp-controller="Logs" asp-action="ServiceLogs" asp-route-id="@s.Id">Logs</a>
+                            <form class="inline" method="post" asp-action="Delete" asp-route-id="@s.Id" onsubmit="return confirm('Delete this service?');">@Html.AntiForgeryToken()<button class="btn btn-danger" type="submit">Delete</button></form>
+                        </div>
+                    </td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    </div>
+}

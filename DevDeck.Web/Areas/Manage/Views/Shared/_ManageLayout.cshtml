@@ -1,0 +1,61 @@
+@{
+    var currentController = (ViewContext.RouteData.Values["controller"] ?? "").ToString();
+    string NavClass(string ctrl) => string.Equals(currentController, ctrl, StringComparison.OrdinalIgnoreCase) ? "active" : "";
+}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@(ViewData["Title"] ?? "DevDeck")</title>
+    <link rel="stylesheet" href="~/css/devdeck.css" asp-append-version="true" />
+</head>
+<body>
+    <div class="app">
+        <aside class="sidebar">
+            <div class="brand">
+                <div class="brand-mark">DD</div>
+                <div>
+                    <div class="brand-name">DevDeck</div>
+                    <div class="brand-sub">local stack</div>
+                </div>
+            </div>
+            <div class="nav-section">Stack</div>
+            <nav>
+                <a class="@NavClass("Dashboard")" asp-area="Manage" asp-controller="Dashboard" asp-action="Index"><span class="icon">▣</span>Dashboard</a>
+                <a class="@NavClass("Services")" asp-area="Manage" asp-controller="Services" asp-action="Index"><span class="icon">⚙</span>Services</a>
+                <a class="@NavClass("ProxyRoutes")" asp-area="Manage" asp-controller="ProxyRoutes" asp-action="Index"><span class="icon">↪</span>Proxy Routes</a>
+                <a class="@NavClass("Profiles")" asp-area="Manage" asp-controller="Profiles" asp-action="Index"><span class="icon">≣</span>Profiles</a>
+                <a class="@NavClass("Runs")" asp-area="Manage" asp-controller="Runs" asp-action="Index"><span class="icon">⌖</span>Runs</a>
+            </nav>
+            <div class="nav-section">System</div>
+            <nav>
+                <a class="@NavClass("Settings")" asp-area="Manage" asp-controller="Settings" asp-action="Index"><span class="icon">✦</span>Settings</a>
+            </nav>
+        </aside>
+        <main class="main">
+            <header class="topbar">
+                <div>
+                    <div class="crumbs">@ViewData["Crumb"]</div>
+                    <h1>@(ViewData["PageTitle"] ?? ViewData["Title"])</h1>
+                </div>
+                <div class="actions">
+                    @RenderSection("Actions", required: false)
+                </div>
+            </header>
+            <div class="content">
+                @if (TempData["Info"] is string info && !string.IsNullOrEmpty(info))
+                {
+                    <div class="flash info">@info</div>
+                }
+                @if (TempData["Error"] is string err && !string.IsNullOrEmpty(err))
+                {
+                    <div class="flash error">@err</div>
+                }
+                @RenderBody()
+            </div>
+        </main>
+    </div>
+    @RenderSection("Scripts", required: false)
+</body>
+</html>

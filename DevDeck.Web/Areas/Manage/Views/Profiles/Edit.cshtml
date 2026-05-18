@@ -1,0 +1,62 @@
+@model ProfileEditViewModel
+@{
+    var isNew = Model.Id == 0;
+    ViewData["Title"] = (isNew ? "New profile" : "Edit profile") + " — DevDeck";
+    ViewData["PageTitle"] = isNew ? "New profile" : $"Edit: {Model.Name}";
+    ViewData["Crumb"] = "Profiles";
+}
+
+<form method="post" asp-action="@(isNew ? "Create" : "Edit")" asp-route-id="@Model.Id">
+    @Html.AntiForgeryToken()
+    <div class="card card-pad">
+        <div class="form-grid">
+            <label>Name</label>
+            <div class="form-row">
+                <input asp-for="Name" />
+                <span asp-validation-for="Name" class="field-validation-error"></span>
+            </div>
+
+            <label>Description</label>
+            <div class="form-row"><input asp-for="Description" /></div>
+
+            <label></label>
+            <div class="form-row" style="flex-direction:row; gap:18px;">
+                <label><input asp-for="IsDefault" type="checkbox" /> Default profile</label>
+            </div>
+
+            <label>Display order</label>
+            <div class="form-row"><input asp-for="DisplayOrder" type="number" /></div>
+        </div>
+    </div>
+
+    <div class="card section" style="margin-top:18px">
+        <div class="card-head"><h2>Services in profile</h2></div>
+        <div class="card-pad">
+            <table class="tbl">
+                <thead><tr><th>Include</th><th>Service</th><th>Order</th><th>Delay (s)</th></tr></thead>
+                <tbody>
+                @for (var i = 0; i < Model.Services.Count; i++)
+                {
+                    var row = Model.Services[i];
+                    var prefix = $"Services[{i}]";
+                    <tr>
+                        <td><input name="@(prefix).Include" type="checkbox" value="true" @(row.Include ? "checked" : "")><input name="@(prefix).Include" type="hidden" value="false" /></td>
+                        <td>@row.ServiceName<input name="@(prefix).DevServiceId" type="hidden" value="@row.DevServiceId" /><input name="@(prefix).ServiceName" type="hidden" value="@row.ServiceName" /></td>
+                        <td><input name="@(prefix).StartOrder" type="number" value="@row.StartOrder" style="width:90px"/></td>
+                        <td><input name="@(prefix).StartDelaySeconds" type="number" value="@row.StartDelaySeconds" style="width:90px"/></td>
+                    </tr>
+                }
+                @if (Model.Services.Count == 0)
+                {
+                    <tr><td colspan="4" class="dim">No services configured yet — create services first.</td></tr>
+                }
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="form-actions">
+        <a class="btn btn-ghost" asp-action="Index">Cancel</a>
+        <button type="submit" class="btn btn-primary">@(isNew ? "Create profile" : "Save changes")</button>
+    </div>
+</form>

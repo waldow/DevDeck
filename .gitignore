@@ -1,0 +1,103 @@
+# ---------------------------------------------------------------
+# .NET build output
+# ---------------------------------------------------------------
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+[Ll]og/
+[Ll]ogs/
+build/
+publish/
+
+# Roslyn cache / build server
+.vs/
+*.binlog
+*.tlog
+*.cache
+
+# ---------------------------------------------------------------
+# IDE / editor
+# ---------------------------------------------------------------
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.userprefs
+.vscode/
+*.swp
+*~
+
+# Rider
+.idea.*/
+
+# ---------------------------------------------------------------
+# Test results / coverage
+# ---------------------------------------------------------------
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+*.VisualState.xml
+TestResult.xml
+nunit-*.xml
+coverage*.json
+coverage*.xml
+coverage*.info
+*.coverage
+*.coveragexml
+.coverage
+.coverlet/
+
+# ---------------------------------------------------------------
+# NuGet
+# ---------------------------------------------------------------
+*.nupkg
+*.snupkg
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+.nuget/
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# ---------------------------------------------------------------
+# EF Core — keep migrations, ignore generated runtime artifacts
+# ---------------------------------------------------------------
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# ---------------------------------------------------------------
+# ASP.NET / Razor
+# ---------------------------------------------------------------
+*.pubxml.user
+*.publishproj
+PublishScripts/
+appsettings.*.Local.json
+secrets.json
+
+# ---------------------------------------------------------------
+# OS junk
+# ---------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------
+# Node (none today, but in case any preset adds tooling later)
+# ---------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ---------------------------------------------------------------
+# Local DevDeck state
+#   DevDeck stores its SQLite DB + log files under LocalAppData,
+#   not the repo — but ignore the conventional local paths too in
+#   case anyone redirects them to the working tree.
+# ---------------------------------------------------------------
+.devdeck/
+devdeck-data/

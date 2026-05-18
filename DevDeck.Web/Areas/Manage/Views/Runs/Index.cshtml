@@ -1,0 +1,57 @@
+@model List<RunsListItem>
+@{
+    ViewData["Title"] = "Runs — DevDeck";
+    ViewData["PageTitle"] = "Run history";
+    ViewData["Crumb"] = "Process executions";
+    var services = (ViewBag.Services as List<DevService>) ?? new();
+    var selectedServiceId = ViewBag.SelectedServiceId as int?;
+    var selectedStatus = ViewBag.SelectedStatus as string;
+}
+
+<form method="get" class="card card-pad section" style="display:flex; gap:14px; align-items:center;">
+    <label class="dim">Service</label>
+    <select name="serviceId" style="width:240px">
+        <option value="">All</option>
+        @foreach (var s in services)
+        {
+            <option value="@s.Id" selected="@(selectedServiceId == s.Id ? "selected" : null)">@s.Name</option>
+        }
+    </select>
+    <label class="dim">Status</label>
+    <select name="status" style="width:160px">
+        <option value="">Any</option>
+        @foreach (var st in new[] { "Running", "Stopped", "Killed", "Crashed", "FailedToStart" })
+        {
+            <option value="@st" selected="@(selectedStatus == st ? "selected" : null)">@st</option>
+        }
+    </select>
+    <button class="btn" type="submit">Filter</button>
+</form>
+
+@if (Model.Count == 0)
+{
+    <div class="empty">No runs match.</div>
+}
+else
+{
+    <div class="table-wrap">
+        <table class="tbl">
+            <thead><tr><th>Run</th><th>Service</th><th>Started</th><th>Stopped</th><th>Duration</th><th>Status</th><th>Exit</th><th>Log</th></tr></thead>
+            <tbody>
+            @foreach (var r in Model)
+            {
+                <tr>
+                    <td><a asp-action="Details" asp-route-id="@r.Id">#@r.Id</a></td>
+                    <td>@r.ServiceName</td>
+                    <td class="dim">@r.StartedUtc.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss")</td>
+                    <td class="dim">@(r.StoppedUtc?.LocalDateTime.ToString("HH:mm:ss") ?? "—")</td>
+                    <td class="mono">@(r.Duration?.ToString(@"hh\:mm\:ss") ?? "—")</td>
+                    <td><span class="pill pill-@(r.Status.ToLower())">@r.Status</span></td>
+                    <td class="mono">@(r.ExitCode?.ToString() ?? "—")</td>
+                    <td>@if (!string.IsNullOrEmpty(r.LogFilePath)) { <a asp-area="Manage" asp-controller="Logs" asp-action="Download" asp-route-runId="@r.Id">download</a> }</td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    </div>
+}

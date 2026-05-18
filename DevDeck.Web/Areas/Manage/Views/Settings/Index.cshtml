@@ -1,0 +1,38 @@
+@model DevDeck.Web.Options.DevDeckOptions
+@{
+    ViewData["Title"] = "Settings — DevDeck";
+    ViewData["PageTitle"] = "Settings";
+    ViewData["Crumb"] = "Configuration";
+}
+
+<div class="card card-pad">
+    <div class="section-title">Locations</div>
+    <dl class="kv">
+        <dt>Database file</dt><dd class="mono dim">@ViewBag.DatabasePath</dd>
+        <dt>Logs folder</dt><dd class="mono dim">@ViewBag.LogsFolder</dd>
+    </dl>
+</div>
+
+<div class="card card-pad section" style="margin-top:18px">
+    <div class="section-title">Runtime</div>
+    <dl class="kv">
+        <dt>Development only</dt><dd>@Model.DevelopmentOnly</dd>
+        <dt>Auto-start enabled services</dt><dd>@Model.AutoStartEnabledServices</dd>
+        <dt>Stop timeout (s)</dt><dd>@Model.StopTimeoutSeconds</dd>
+        <dt>Dashboard polling (ms)</dt><dd>@Model.DashboardPollingMilliseconds</dd>
+        <dt>Max live log lines / service</dt><dd>@Model.MaxLiveLogLinesPerService</dd>
+        <dt>Log trim amount</dt><dd>@Model.LogTrimAmount</dd>
+        <dt>Log retention (days)</dt><dd>@Model.LogRetentionDays</dd>
+    </dl>
+</div>
+
+<div class="card card-pad section" style="margin-top:18px">
+    <div class="section-title">Reverse proxy</div>
+    <dl class="kv">
+        <dt>Enabled</dt><dd>@Model.ReverseProxy.Enabled</dd>
+        <dt>Gateway base URL</dt><dd class="mono">@Model.ReverseProxy.GatewayBaseUrl</dd>
+        <dt>Allow external destinations</dt><dd>@Model.ReverseProxy.AllowExternalDestinations</dd>
+        <dt>Auto-start on request</dt><dd>@Model.ReverseProxy.EnableAutoStartOnRequest</dd>
+    </dl>
+    <p class="hint">Edit values in <span class="k">appsettings.json</span> under the <span class="k">DevDeck</span> section.</p>
+</div>

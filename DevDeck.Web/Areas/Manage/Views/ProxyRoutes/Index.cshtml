@@ -1,0 +1,67 @@
+@model List<ProxyRoute>
+@{
+    ViewData["Title"] = "Proxy routes — DevDeck";
+    ViewData["PageTitle"] = "Proxy routes";
+    ViewData["Crumb"] = "Reverse proxy gateway";
+    var warnings = (ViewBag.Warnings as IReadOnlyList<string>) ?? new List<string>();
+    var gateway = (ViewBag.GatewayBaseUrl as string ?? "http://localhost:5050").TrimEnd('/');
+}
+
+@section Actions {
+    <form class="inline" method="post" asp-action="Reload">@Html.AntiForgeryToken()<button class="btn" type="submit">Reload config</button></form>
+    <a class="btn btn-primary" asp-action="Create">+ New route</a>
+}
+
+@if (warnings.Count > 0)
+{
+    <div class="flash error">
+        <strong>Proxy warnings:</strong>
+        <ul style="margin:6px 0 0 18px">
+            @foreach (var w in warnings) { <li>@w</li> }
+        </ul>
+    </div>
+}
+
+<div class="dim section">Gateway base URL: <span class="k">@gateway</span></div>
+
+@if (Model.Count == 0)
+{
+    <div class="empty">No proxy routes yet.</div>
+}
+else
+{
+    <div class="table-wrap">
+        <table class="tbl">
+            <thead><tr><th>Name</th><th>Enabled</th><th>Match path</th><th>Destination</th><th>Transform</th><th>Order</th><th></th></tr></thead>
+            <tbody>
+            @foreach (var r in Model.OrderBy(x => x.Order))
+            {
+                <tr>
+                    <td><strong>@r.Name</strong></td>
+                    <td>@if (r.Enabled) { <span class="pill pill-running">on</span> } else { <span class="pill pill-stopped">off</span> }</td>
+                    <td class="mono">@r.MatchPath</td>
+                    <td class="mono dim">@(r.DestinationUrlOverride ?? r.DevService?.Url ?? "—")</td>
+                    <td class="mono">@r.PathTransformMode</td>
+                    <td class="mono">@r.Order</td>
+                    <td>
+                        <div class="btn-row">
+                            <a class="btn" href="@(gateway + DevDeck.Web.Areas.Manage.Controllers.DashboardController.ExampleProxyPath(r.MatchPath))" target="_blank" rel="noopener">Open</a>
+                            <a class="btn" asp-action="Test" asp-route-id="@r.Id">Test</a>
+                            @if (r.Enabled)
+                            {
+                                <form class="inline" method="post" asp-action="Disable" asp-route-id="@r.Id">@Html.AntiForgeryToken()<button class="btn btn-warn" type="submit">Disable</button></form>
+                            }
+                            else
+                            {
+                                <form class="inline" method="post" asp-action="Enable" asp-route-id="@r.Id">@Html.AntiForgeryToken()<button class="btn btn-ok" type="submit">Enable</button></form>
+                            }
+                            <a class="btn" asp-action="Edit" asp-route-id="@r.Id">Edit</a>
+                            <form class="inline" method="post" asp-action="Delete" asp-route-id="@r.Id" onsubmit="return confirm('Delete this proxy route?');">@Html.AntiForgeryToken()<button class="btn btn-danger" type="submit">Delete</button></form>
+                        </div>
+                    </td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    </div>
+}

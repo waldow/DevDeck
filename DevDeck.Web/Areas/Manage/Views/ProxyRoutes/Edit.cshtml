@@ -1,0 +1,90 @@
+@model ProxyRouteEditViewModel
+@{
+    var isNew = Model.Id == 0;
+    ViewData["Title"] = (isNew ? "New proxy route" : "Edit proxy route") + " — DevDeck";
+    ViewData["PageTitle"] = isNew ? "New proxy route" : $"Edit: {Model.Name}";
+    ViewData["Crumb"] = "Proxy routes";
+    var modes = new[] { "None", "RemovePrefix", "AddPrefix", "RemoveAndAddPrefix", "SetPath" };
+}
+
+<form method="post" asp-action="@(isNew ? "Create" : "Edit")" asp-route-id="@Model.Id">
+    @Html.AntiForgeryToken()
+    <div class="card card-pad">
+        <div class="form-grid">
+            <label>Name</label>
+            <div class="form-row"><input asp-for="Name" /><span asp-validation-for="Name" class="field-validation-error"></span></div>
+
+            <label></label>
+            <div class="form-row" style="flex-direction:row; gap:18px;">
+                <label><input asp-for="Enabled" type="checkbox" /> Enabled</label>
+                <label><input asp-for="ShowOnDashboard" type="checkbox" /> Show proxy link on dashboard</label>
+            </div>
+
+            <label>Destination service</label>
+            <div class="form-row">
+                <select asp-for="DevServiceId">
+                    <option value="">— (use override URL only) —</option>
+                    @foreach (var s in Model.AvailableServices)
+                    {
+                        <option value="@s.Id">@s.Name @(s.Url is null ? "" : $"({s.Url})")</option>
+                    }
+                </select>
+                <span asp-validation-for="DevServiceId" class="field-validation-error"></span>
+            </div>
+
+            <label>Destination URL override</label>
+            <div class="form-row">
+                <input asp-for="DestinationUrlOverride" class="mono" placeholder="http://localhost:5173/" />
+                <span asp-validation-for="DestinationUrlOverride" class="field-validation-error"></span>
+                <span class="hint">If empty, the linked service's URL is used.</span>
+            </div>
+
+            <label>Match path</label>
+            <div class="form-row">
+                <input asp-for="MatchPath" class="mono" />
+                <span asp-validation-for="MatchPath" class="field-validation-error"></span>
+                <span class="hint">Examples: <span class="k">/app/{**catch-all}</span>, <span class="k">/api/{**catch-all}</span></span>
+            </div>
+
+            <label>Match hosts (csv)</label>
+            <div class="form-row"><input asp-for="MatchHostsCsv" placeholder="optional, e.g. app.localhost" class="mono" /></div>
+
+            <label>Order</label>
+            <div class="form-row"><input asp-for="Order" type="number" /></div>
+
+            <label>Path transform mode</label>
+            <div class="form-row">
+                <select asp-for="PathTransformMode">
+                    @foreach (var m in modes) { <option value="@m">@m</option> }
+                </select>
+            </div>
+
+            <label>Prefix to remove</label>
+            <div class="form-row"><input asp-for="PathPrefixToRemove" class="mono" placeholder="/app" /></div>
+
+            <label>Prefix to add</label>
+            <div class="form-row"><input asp-for="PathPrefixToAdd" class="mono" placeholder="/api" /></div>
+
+            <label>Path set</label>
+            <div class="form-row"><input asp-for="PathSet" class="mono" /></div>
+
+            <label></label>
+            <div class="form-row" style="flex-direction:row; gap:18px;">
+                <label><input asp-for="PreserveHostHeader" type="checkbox" /> Preserve host header</label>
+                <label><input asp-for="AutoStartService" type="checkbox" /> Auto-start service</label>
+                <label><input asp-for="RequireHealthyDestination" type="checkbox" /> Require healthy destination</label>
+            </div>
+
+            <label>Timeout (s)</label>
+            <div class="form-row"><input asp-for="TimeoutSeconds" type="number" /></div>
+
+            <label>Authorization policy</label>
+            <div class="form-row"><input asp-for="AuthorizationPolicy" /></div>
+        </div>
+    </div>
+
+    <div class="form-actions">
+        <a class="btn btn-ghost" asp-action="Index">Cancel</a>
+        <button type="submit" class="btn btn-primary">@(isNew ? "Create route" : "Save changes")</button>
+    </div>
+</form>

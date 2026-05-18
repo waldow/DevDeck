@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="DevDeck.Tests/DevDeck.Tests.csproj" />
+  <Project Path="DevDeck.Web/DevDeck.Web.csproj" />
+</Solution>

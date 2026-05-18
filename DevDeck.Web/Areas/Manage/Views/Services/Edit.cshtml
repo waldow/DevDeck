@@ -1,0 +1,152 @@
+@model ServiceEditViewModel
+@{
+    var isNew = Model.Id == 0;
+    ViewData["Title"] = (isNew ? "New service" : "Edit service") + " — DevDeck";
+    ViewData["PageTitle"] = isNew ? "New service" : $"Edit: {Model.Name}";
+    ViewData["Crumb"] = "Services";
+    var presets = (ViewBag.Presets as IReadOnlyList<CommandPreset>) ?? new List<CommandPreset>();
+    var isRunning = ViewBag.IsRunning as bool? == true;
+    var portWarning = ViewBag.PortWarning as string;
+}
+
+@if (isRunning)
+{
+    <div class="flash info">This service is currently running. Changes will apply after restart.</div>
+}
+@if (!string.IsNullOrEmpty(portWarning))
+{
+    <div class="flash error">@portWarning</div>
+}
+
+<form method="post" asp-action="@(isNew ? "Create" : "Edit")" asp-route-id="@Model.Id">
+    @Html.AntiForgeryToken()
+    <div class="card card-pad">
+        <div class="form-grid">
+            <label for="Name">Name</label>
+            <div class="form-row">
+                <input asp-for="Name" />
+                <span asp-validation-for="Name" class="field-validation-error"></span>
+            </div>
+
+            <label for="ServiceType">Type</label>
+            <div class="form-row">
+                <select asp-for="ServiceType">
+                    @foreach (var p in presets) { <option value="@p.Key">@p.DisplayName</option> }
+                </select>
+            </div>
+
+            <label for="WorkingDirectory">Working directory</label>
+            <div class="form-row">
+                <input asp-for="WorkingDirectory" class="mono" placeholder="/path/to/project or C:\path\to\project" />
+                <span asp-validation-for="WorkingDirectory" class="field-validation-error"></span>
+                <span class="hint">Absolute path. Must exist when the service is started.</span>
+            </div>
+
+            <label for="StartCommand">Start command</label>
+            <div class="form-row">
+                <input asp-for="StartCommand" class="mono" />
+                <span class="hint">Executable name (will resolve <span class="k">npm</span>/<span class="k">npm.cmd</span> per OS) or absolute path.</span>
+            </div>
+
+            <label for="StartArguments">Start arguments</label>
+            <div class="form-row">
+                <input asp-for="StartArguments" class="mono" />
+                <span class="hint">Placeholders: <span class="k">{port}</span> <span class="k">{name}</span> <span class="k">{id}</span> <span class="k">{workingDirectory}</span></span>
+            </div>
+
+            <label for="Port">Port</label>
+            <div class="form-row"><input asp-for="Port" type="number" /></div>
+
+            <label for="Url">URL</label>
+            <div class="form-row"><input asp-for="Url" class="mono" placeholder="http://localhost:{port}" /></div>
+
+            <label></label>
+            <div class="form-row" style="flex-direction:row; gap:18px; align-items:center;">
+                <label style="padding-top:0"><input asp-for="Enabled" type="checkbox" /> Enabled</label>
+                <label style="padding-top:0"><input asp-for="AutoStart" type="checkbox" /> Auto-start with DevDeck</label>
+            </div>
+
+            <label for="DisplayOrder">Display order</label>
+            <div class="form-row"><input asp-for="DisplayOrder" type="number" /></div>
+        </div>
+    </div>
+
+    <div class="card section" style="margin-top:18px">
+        <div class="card-head"><h2>Environment variables</h2></div>
+        <div class="card-pad">
+            <table class="tbl" id="envvars">
+                <thead><tr><th>Key</th><th>Value</th><th>Secret</th><th></th></tr></thead>
+                <tbody>
+                    @for (var i = 0; i < Model.EnvironmentVariables.Count; i++)
+                    {
+                        var prefix = $"EnvironmentVariables[{i}]";
+                        <tr>
+                            <td><input name="@(prefix).Id" type="hidden" value="@Model.EnvironmentVariables[i].Id" /><input name="@(prefix).Key" value="@Model.EnvironmentVariables[i].Key" class="mono" /></td>
+                            <td><input name="@(prefix).Value" value="@Model.EnvironmentVariables[i].Value" class="mono" /></td>
+                            <td><input name="@(prefix).IsSecret" type="checkbox" value="true" @(Model.EnvironmentVariables[i].IsSecret ? "checked" : "")><input name="@(prefix).IsSecret" type="hidden" value="false" /></td>
+                            <td><label class="dim"><input name="@(prefix).Delete" type="checkbox" value="true" /> remove</label><input name="@(prefix).Delete" type="hidden" value="false" /></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+            <button type="button" class="btn" id="addEnv" style="margin-top:10px">+ Add variable</button>
+        </div>
+    </div>
+
+    <div class="card section" style="margin-top:18px">
+        <div class="card-head"><h2>Health checks</h2></div>
+        <div class="card-pad">
+            <table class="tbl" id="healthchecks">
+                <thead><tr><th>URL</th><th>Expected code</th><th>Interval (s)</th><th>Enabled</th><th></th></tr></thead>
+                <tbody>
+                    @for (var i = 0; i < Model.HealthChecks.Count; i++)
+                    {
+                        var prefix = $"HealthChecks[{i}]";
+                        <tr>
+                            <td><input name="@(prefix).Id" type="hidden" value="@Model.HealthChecks[i].Id" /><input name="@(prefix).Url" value="@Model.HealthChecks[i].Url" class="mono" /></td>
+                            <td><input name="@(prefix).ExpectedStatusCode" value="@Model.HealthChecks[i].ExpectedStatusCode" type="number" /></td>
+                            <td><input name="@(prefix).IntervalSeconds" value="@Model.HealthChecks[i].IntervalSeconds" type="number" /></td>
+                            <td><input name="@(prefix).Enabled" type="checkbox" value="true" @(Model.HealthChecks[i].Enabled ? "checked" : "")><input name="@(prefix).Enabled" type="hidden" value="false" /></td>
+                            <td><label class="dim"><input name="@(prefix).Delete" type="checkbox" value="true" /> remove</label><input name="@(prefix).Delete" type="hidden" value="false" /></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+            <button type="button" class="btn" id="addHc" style="margin-top:10px">+ Add health check</button>
+        </div>
+    </div>
+
+    <div class="form-actions">
+        <a class="btn btn-ghost" asp-action="Index">Cancel</a>
+        <button type="submit" class="btn btn-primary">@(isNew ? "Create service" : "Save changes")</button>
+    </div>
+</form>
+
+@section Scripts {
+    <script>
+    (function () {
+        function addRow(tableId, columns) {
+            const tbody = document.querySelector('#' + tableId + ' tbody');
+            const idx = tbody.children.length;
+            const tr = document.createElement('tr');
+            tr.innerHTML = columns(idx);
+            tbody.appendChild(tr);
+        }
+        document.getElementById('addEnv')?.addEventListener('click', () => {
+            addRow('envvars', i => `
+                <td><input name="EnvironmentVariables[${i}].Id" type="hidden" value="0" /><input name="EnvironmentVariables[${i}].Key" class="mono" /></td>
+                <td><input name="EnvironmentVariables[${i}].Value" class="mono" /></td>
+                <td><input name="EnvironmentVariables[${i}].IsSecret" type="checkbox" value="true" /><input name="EnvironmentVariables[${i}].IsSecret" type="hidden" value="false" /></td>
+                <td><label class="dim"><input name="EnvironmentVariables[${i}].Delete" type="checkbox" value="true" /> remove</label><input name="EnvironmentVariables[${i}].Delete" type="hidden" value="false" /></td>`);
+        });
+        document.getElementById('addHc')?.addEventListener('click', () => {
+            addRow('healthchecks', i => `
+                <td><input name="HealthChecks[${i}].Id" type="hidden" value="0" /><input name="HealthChecks[${i}].Url" class="mono" /></td>
+                <td><input name="HealthChecks[${i}].ExpectedStatusCode" type="number" value="200" /></td>
+                <td><input name="HealthChecks[${i}].IntervalSeconds" type="number" value="10" /></td>
+                <td><input name="HealthChecks[${i}].Enabled" type="checkbox" value="true" checked /><input name="HealthChecks[${i}].Enabled" type="hidden" value="false" /></td>
+                <td><label class="dim"><input name="HealthChecks[${i}].Delete" type="checkbox" value="true" /> remove</label><input name="HealthChecks[${i}].Delete" type="hidden" value="false" /></td>`);
+        });
+    })();
+    </script>
+}

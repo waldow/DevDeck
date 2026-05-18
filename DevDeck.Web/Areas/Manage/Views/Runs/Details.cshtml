@@ -1,0 +1,30 @@
+@model RunDetailsViewModel
+@{
+    ViewData["Title"] = $"Run #{Model.Run.Id} — DevDeck";
+    ViewData["PageTitle"] = $"Run #{Model.Run.Id}";
+    ViewData["Crumb"] = Model.ServiceName;
+}
+
+<div class="card card-pad">
+    <dl class="kv">
+        <dt>Service</dt><dd>@Model.ServiceName</dd>
+        <dt>Started</dt><dd>@Model.Run.StartedUtc.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss")</dd>
+        <dt>Stopped</dt><dd>@(Model.Run.StoppedUtc?.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss") ?? "—")</dd>
+        <dt>Status</dt><dd><span class="pill pill-@(Model.Run.Status.ToLower())">@Model.Run.Status</span></dd>
+        <dt>PID</dt><dd class="mono">@(Model.Run.ProcessId?.ToString() ?? "—")</dd>
+        <dt>Exit code</dt><dd class="mono">@(Model.Run.ExitCode?.ToString() ?? "—")</dd>
+        <dt>Command</dt><dd class="mono">@Model.Run.StartCommandSnapshot @Model.Run.StartArgumentsSnapshot</dd>
+        <dt>Working dir</dt><dd class="mono dim">@Model.Run.WorkingDirectorySnapshot</dd>
+        <dt>Log file</dt><dd class="mono dim">@Model.Run.LogFilePath</dd>
+        @if (!string.IsNullOrEmpty(Model.Run.LastError))
+        {
+            <dt>Last error</dt><dd class="mono">@Model.Run.LastError</dd>
+        }
+    </dl>
+    @if (!string.IsNullOrEmpty(Model.Run.LogFilePath))
+    {
+        <div style="margin-top:14px">
+            <a class="btn btn-primary" asp-area="Manage" asp-controller="Logs" asp-action="Download" asp-route-runId="@Model.Run.Id">Download log file</a>
+        </div>
+    }
+</div>

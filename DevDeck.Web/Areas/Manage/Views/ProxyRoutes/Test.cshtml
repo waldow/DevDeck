@@ -1,0 +1,30 @@
+@model ProxyRouteTestViewModel
+@{
+    ViewData["Title"] = $"Test route — {Model.Name}";
+    ViewData["PageTitle"] = $"Test: {Model.Name}";
+    ViewData["Crumb"] = "Proxy routes";
+}
+
+<div class="card card-pad">
+    <dl class="kv">
+        <dt>Route enabled</dt><dd>@(Model.Enabled ? "yes" : "no")</dd>
+        <dt>Match path</dt><dd class="mono">@Model.MatchPath</dd>
+        <dt>Destination URL</dt><dd class="mono">@(Model.DestinationUrl ?? "—")</dd>
+        <dt>Destination port open</dt><dd>@(Model.DestinationPortOpen ? "yes" : "no")</dd>
+        <dt>Service running</dt><dd>@(Model.ServiceRunning ? "yes" : "no")</dd>
+        <dt>Health status</dt><dd><span class="pill pill-@(Model.HealthStatus.ToLower())">@Model.HealthStatus</span></dd>
+        <dt>Example proxy URL</dt><dd><a href="@Model.ExampleProxyUrl" target="_blank" rel="noopener">@Model.ExampleProxyUrl</a></dd>
+    </dl>
+    @if (Model.Warnings.Count > 0)
+    {
+        <div class="flash error" style="margin-top:14px">
+            <strong>Warnings:</strong>
+            <ul style="margin:6px 0 0 18px">@foreach (var w in Model.Warnings) { <li>@w</li> }</ul>
+        </div>
+    }
+</div>
+
+<div style="margin-top:14px">
+    <a class="btn" asp-action="Index">Back</a>
+    <a class="btn" asp-action="Edit" asp-route-id="@Model.Id">Edit</a>
+</div>
