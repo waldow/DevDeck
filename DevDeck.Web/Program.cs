@@ -83,11 +83,7 @@ app.MapControllerRoute(
     name: "areas",
     pattern: "{area:exists}/{controller=Dashboard}/{action=Index}/{id?}");
 
-app.MapControllerRoute(
-    name: "default",
-    pattern: "{controller=Home}/{action=Index}/{id?}");
-
-// Important: reverse proxy routes are mapped AFTER MVC routes so /Manage always wins.
+// Important: management routes are mapped before the reverse proxy so /Manage always wins.
 if (devDeckOptions.ReverseProxy.Enabled)
 {
     app.MapReverseProxy(proxyPipeline =>
@@ -102,6 +98,9 @@ if (devDeckOptions.ReverseProxy.Enabled)
         });
     });
 }
+
+// Root redirects to Manage only when no proxy route, such as /{**catch-all}, handles it first.
+app.MapGet("/", () => Results.Redirect("/Manage")).WithOrder(int.MaxValue);
 
 app.Run();
 
