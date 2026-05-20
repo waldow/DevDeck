@@ -96,13 +96,17 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
             var values = CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.Port, service.WorkingDirectory);
             var argsRender = _renderer.Render(service.StartArguments, values);
             var resolvedCommand = _resolver.Resolve(service.StartCommand);
+            var renderedEnvironment = service.EnvironmentVariables
+                .Select(env => new RenderedEnvironmentVariable(env.Key, _renderer.Render(env.Value, values).Text, env.IsSecret))
+                .ToList();
+            var launchCommand = _resolver.ResolveForLaunch(service.StartCommand, EffectivePathValue(renderedEnvironment));
 
             var run = new ServiceRun
             {
                 DevServiceId = service.Id,
                 StartedUtc = DateTimeOffset.UtcNow,
                 Status = ProcessStatusNames.Starting,
-                StartCommandSnapshot = resolvedCommand,
+                StartCommandSnapshot = launchCommand,
                 StartArgumentsSnapshot = argsRender.Text,
                 WorkingDirectorySnapshot = service.WorkingDirectory,
             };
@@ -115,7 +119,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
 
             var psi = new ProcessStartInfo
             {
-                FileName = resolvedCommand,
+                FileName = launchCommand,
                 Arguments = argsRender.Text,
                 WorkingDirectory = service.WorkingDirectory,
                 UseShellExecute = false,
@@ -125,10 +129,9 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
                 CreateNoWindow = true,
             };
 
-            foreach (var env in service.EnvironmentVariables)
+            foreach (var env in renderedEnvironment)
             {
-                var rendered = _renderer.Render(env.Value, values).Text;
-                psi.EnvironmentVariables[env.Key] = rendered;
+                psi.EnvironmentVariables[env.Key] = env.Value;
             }
 
             var serviceIdLocal = service.Id;
@@ -172,6 +175,8 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
                     return new StartServiceResult { ServiceId = service.Id, RunId = run.Id, Success = false, Error = "Service is already running." };
                 }
 
+                AppendLaunchDiagnostics(service.Id, run.Id, logPath, resolvedCommand, launchCommand, argsRender.Text,
+                    service.WorkingDirectory, renderedEnvironment);
                 process.Start();
             }
             catch (Exception ex)
@@ -375,6 +380,25 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
     private void AppendSystemLine(int serviceId, long runId, string logPath, string text) =>
         WriteLine(serviceId, runId, logPath, "SYS", text);
 
+    private void AppendLaunchDiagnostics(
+        int serviceId,
+        long runId,
+        string logPath,
+        string resolvedCommand,
+        string launchCommand,
+        string arguments,
+        string workingDirectory,
+        IReadOnlyCollection<RenderedEnvironmentVariable> environment)
+    {
+        AppendSystemLine(serviceId, runId, logPath, $"Launch command: {QuoteForLog(launchCommand)} {arguments}".TrimEnd());
+        AppendSystemLine(serviceId, runId, logPath, $"Working directory: {workingDirectory}");
+        if (!string.Equals(resolvedCommand, launchCommand, StringComparison.OrdinalIgnoreCase))
+        {
+            AppendSystemLine(serviceId, runId, logPath, $"Resolved executable: {resolvedCommand} -> {launchCommand}");
+        }
+        AppendSystemLine(serviceId, runId, logPath, $"Environment overrides: {FormatEnvironmentOverrides(environment)}");
+    }
+
     private async Task HandleProcessExitedAsync(int serviceId, long runId, string logPath, Process process)
     {
         int? exitCode = null;
@@ -409,6 +433,31 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
     {
         try { return p.Id; } catch { return null; }
     }
+
+    private static string? EffectivePathValue(IReadOnlyCollection<RenderedEnvironmentVariable> environment)
+    {
+        var pathOverride = environment.LastOrDefault(e => string.Equals(e.Key, "PATH", StringComparison.OrdinalIgnoreCase));
+        return pathOverride?.Value ?? Environment.GetEnvironmentVariable("PATH");
+    }
+
+    private static string FormatEnvironmentOverrides(IReadOnlyCollection<RenderedEnvironmentVariable> environment)
+    {
+        if (environment.Count == 0)
+        {
+            return "none";
+        }
+
+        return string.Join(", ", environment.Select(e => $"{e.Key}={(e.IsSecret ? "***" : TrimForLog(e.Value))}"));
+    }
+
+    private static string TrimForLog(string value)
+    {
+        const int maxLength = 200;
+        return value.Length <= maxLength ? value : value[..maxLength] + "...";
+    }
+
+    private static string QuoteForLog(string value) =>
+        value.Contains(' ') ? $"\"{value}\"" : value;
 
     private bool ExecutionAllowed() =>
         !_options.CurrentValue.DevelopmentOnly || _environment.IsDevelopment();
@@ -471,6 +520,8 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
 
     [DllImport("libc", EntryPoint = "kill", SetLastError = true)]
     private static extern int PosixKill(int pid, int sig);
+
+    private sealed record RenderedEnvironmentVariable(string Key, string Value, bool IsSecret);
 
     private static async Task<bool> WaitForExitAsync(Process process, TimeSpan timeout, CancellationToken cancellationToken)
     {

@@ -5,6 +5,7 @@ namespace DevDeck.Web.Services.Commands;
 public sealed class CommandExecutableResolver
 {
     private readonly bool _isWindows;
+    private static readonly char[] DirectorySeparators = ['\\', '/'];
 
     public CommandExecutableResolver()
         : this(RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -58,5 +59,79 @@ public sealed class CommandExecutableResolver
             "docker.exe" => "docker",
             _ => name,
         };
+    }
+
+    public string ResolveForLaunch(string command, string? pathValue = null)
+    {
+        var resolved = Resolve(command);
+        if (string.IsNullOrWhiteSpace(resolved) ||
+            Path.IsPathRooted(resolved) ||
+            resolved.IndexOfAny(DirectorySeparators) >= 0)
+        {
+            return resolved;
+        }
+
+        return FindOnPath(resolved, pathValue) ?? resolved;
+    }
+
+    private string? FindOnPath(string command, string? pathValue)
+    {
+        var path = string.IsNullOrWhiteSpace(pathValue)
+            ? Environment.GetEnvironmentVariable("PATH")
+            : pathValue;
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return null;
+        }
+
+        foreach (var directory in path.Split(_isWindows ? ';' : ':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var cleanDirectory = directory.Trim('"');
+            foreach (var candidateName in CandidateNames(command))
+            {
+                string candidate;
+                try
+                {
+                    candidate = Path.Combine(cleanDirectory, candidateName);
+                }
+                catch (ArgumentException)
+                {
+                    continue;
+                }
+
+                if (File.Exists(candidate))
+                {
+                    return Path.GetFullPath(candidate);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private IEnumerable<string> CandidateNames(string command)
+    {
+        yield return command;
+
+        if (!_isWindows || Path.HasExtension(command))
+        {
+            yield break;
+        }
+
+        foreach (var extension in WindowsPathExtensions())
+        {
+            yield return command + extension;
+        }
+    }
+
+    private static IEnumerable<string> WindowsPathExtensions()
+    {
+        var value = Environment.GetEnvironmentVariable("PATHEXT");
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            value = ".COM;.EXE;.BAT;.CMD";
+        }
+
+        return value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 }

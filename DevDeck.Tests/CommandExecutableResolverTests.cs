@@ -42,4 +42,49 @@ public sealed class CommandExecutableResolverTests
         rWin.Resolve("/usr/bin/node").Should().Be("/usr/bin/node");
         rNix.Resolve("/usr/bin/node").Should().Be("/usr/bin/node");
     }
+
+    [Fact]
+    public void ResolveForLaunch_resolves_simple_windows_command_from_path()
+    {
+        var temp = Directory.CreateTempSubdirectory("devdeck-resolver-");
+        try
+        {
+            var npm = Path.Combine(temp.FullName, "npm.cmd");
+            File.WriteAllText(npm, "@echo off");
+
+            var r = new CommandExecutableResolver(isWindows: true);
+
+            r.ResolveForLaunch("npm", temp.FullName).Should().Be(Path.GetFullPath(npm));
+        }
+        finally
+        {
+            temp.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ResolveForLaunch_does_not_path_search_explicit_relative_path()
+    {
+        var temp = Directory.CreateTempSubdirectory("devdeck-resolver-");
+        try
+        {
+            File.WriteAllText(Path.Combine(temp.FullName, "npm.cmd"), "@echo off");
+
+            var r = new CommandExecutableResolver(isWindows: true);
+
+            r.ResolveForLaunch(".\\npm.cmd", temp.FullName).Should().Be(".\\npm.cmd");
+        }
+        finally
+        {
+            temp.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ResolveForLaunch_leaves_command_when_path_has_no_match()
+    {
+        var r = new CommandExecutableResolver(isWindows: true);
+
+        r.ResolveForLaunch("custom-tool", "C:\\definitely-not-a-real-devdeck-path").Should().Be("custom-tool");
+    }
 }
