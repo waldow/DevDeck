@@ -246,7 +246,7 @@ public sealed class ProxyRoutesController : Controller
             vm.DestinationPortOpen = await _portProbe.IsPortOpenAsync(uri.Port);
         }
 
-        if (ReservedPaths.IsReserved(entity.MatchPath, out var reason))
+        if (ReservedPaths.IsReserved(entity.MatchPath, out var reason, _options.Value.ReverseProxy.AllowCatchAllRoutes))
         {
             vm.Warnings.Add(reason);
         }
@@ -336,7 +336,7 @@ public sealed class ProxyRoutesController : Controller
 
     private async Task ValidateAsync(ProxyRouteEditViewModel model)
     {
-        if (ReservedPaths.IsReserved(model.MatchPath, out var reason))
+        if (ReservedPaths.IsReserved(model.MatchPath, out var reason, _options.Value.ReverseProxy.AllowCatchAllRoutes))
         {
             ModelState.AddModelError(nameof(model.MatchPath), reason);
         }

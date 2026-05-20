@@ -19,5 +19,6 @@ public sealed class DevDeckReverseProxyOptions
     public bool Enabled { get; set; } = true;
     public string GatewayBaseUrl { get; set; } = "http://localhost:5050";
     public bool AllowExternalDestinations { get; set; } = false;
+    public bool AllowCatchAllRoutes { get; set; } = false;
     public bool EnableAutoStartOnRequest { get; set; } = false;
 }

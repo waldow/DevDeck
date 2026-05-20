@@ -1,4 +1,6 @@
 using DevDeck.Web.Data.Entities;
+using DevDeck.Web.Options;
+using Microsoft.Extensions.Options;
 using Yarp.ReverseProxy.Configuration;
 
 namespace DevDeck.Web.Services.Proxy;
@@ -6,10 +8,12 @@ namespace DevDeck.Web.Services.Proxy;
 public sealed class ProxyRouteBuilder
 {
     private readonly ProxyDestinationValidator _validator;
+    private readonly IOptionsMonitor<DevDeckOptions>? _options;
 
-    public ProxyRouteBuilder(ProxyDestinationValidator validator)
+    public ProxyRouteBuilder(ProxyDestinationValidator validator, IOptionsMonitor<DevDeckOptions>? options = null)
     {
         _validator = validator;
+        _options = options;
     }
 
     public ProxyBuildResult Build(IEnumerable<ProxyRoute> routes)
@@ -20,7 +24,8 @@ public sealed class ProxyRouteBuilder
 
         foreach (var route in routes.Where(r => r.Enabled).OrderBy(r => r.Order))
         {
-            if (ReservedPaths.IsReserved(route.MatchPath, out var reservedReason))
+            var allowCatchAllRoutes = _options?.CurrentValue.ReverseProxy.AllowCatchAllRoutes ?? false;
+            if (ReservedPaths.IsReserved(route.MatchPath, out var reservedReason, allowCatchAllRoutes))
             {
                 warnings.Add($"[{route.Name}] {reservedReason}");
                 continue;

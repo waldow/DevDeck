@@ -32,6 +32,16 @@ public sealed class ReservedPathTests
     }
 
     [Theory]
+    [InlineData("/{**catch-all}")]
+    [InlineData("/{*catch-all}")]
+    [InlineData("/")]
+    public void Catch_all_accepted_with_override(string path)
+    {
+        ReservedPaths.IsReserved(path, out var reason, allowCatchAllRoutes: true).Should().BeFalse();
+        reason.Should().BeEmpty();
+    }
+
+    [Theory]
     [InlineData("/app/{**catch-all}")]
     [InlineData("/api/{**catch-all}")]
     [InlineData("/functions/{**catch-all}")]

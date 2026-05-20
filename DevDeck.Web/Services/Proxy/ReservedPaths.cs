@@ -21,7 +21,7 @@ public static class ReservedPaths
         "/{*catch-all}",
     };
 
-    public static bool IsReserved(string matchPath, out string reason)
+    public static bool IsReserved(string matchPath, out string reason, bool allowCatchAllRoutes = false)
     {
         if (string.IsNullOrWhiteSpace(matchPath))
         {
@@ -33,9 +33,9 @@ public static class ReservedPaths
 
         foreach (var forbidden in ForbiddenWithoutOverride)
         {
-            if (string.Equals(trimmed, forbidden, StringComparison.OrdinalIgnoreCase))
+            if (!allowCatchAllRoutes && string.Equals(trimmed, forbidden, StringComparison.OrdinalIgnoreCase))
             {
-                reason = $"Catch-all route '{forbidden}' is disabled by default. Use a specific prefix like /app/{{**catch-all}}.";
+                reason = $"Catch-all route '{forbidden}' is disabled by default. Enable DevDeck:ReverseProxy:AllowCatchAllRoutes or use a specific prefix like /app/{{**catch-all}}.";
                 return true;
             }
         }
