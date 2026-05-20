@@ -11,8 +11,8 @@ using Yarp.ReverseProxy.Configuration;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Kestrel binding — DevDeck gateway listens on 5050 by default (spec §33).
-builder.WebHost.UseUrls("http://localhost:5050");
+// Kestrel binding — DevDeck gateway listens on the configured gateway URL.
+builder.WebHost.UseUrls(GatewayUrlResolver.ResolveListenUrl(builder.Configuration));
 
 builder.Services.Configure<DevDeckOptions>(builder.Configuration.GetSection(DevDeckOptions.SectionName));
 
