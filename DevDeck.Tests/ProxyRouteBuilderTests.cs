@@ -110,6 +110,72 @@ public sealed class ProxyRouteBuilderTests
     }
 
     [Fact]
+    public void Build_renders_linked_service_url_template_before_validation()
+    {
+        var routes = new[]
+        {
+            new ProxyRoute
+            {
+                Id = 12,
+                Name = "Templated",
+                Enabled = true,
+                DevServiceId = 7,
+                DestinationUrlOverride = "",
+                DevService = new DevService
+                {
+                    Id = 7,
+                    Name = "Main site",
+                    ServiceType = "Vite",
+                    WorkingDirectory = "C:\\work\\main",
+                    StartCommand = "npm",
+                    Url = "http://localhost:{port}",
+                    Port = 5173,
+                },
+                MatchPath = "/app/{**catch-all}",
+                PathTransformMode = "None",
+            },
+        };
+
+        var result = _builder.Build(routes);
+
+        result.Routes.Should().ContainSingle();
+        result.Clusters.Should().ContainSingle();
+        result.Clusters[0].Destinations!["destination-0"].Address.Should().Be("http://localhost:5173/");
+        result.Warnings.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Build_skips_linked_service_url_template_when_port_placeholder_cannot_be_rendered()
+    {
+        var routes = new[]
+        {
+            new ProxyRoute
+            {
+                Id = 12,
+                Name = "MissingPort",
+                Enabled = true,
+                DevServiceId = 7,
+                DevService = new DevService
+                {
+                    Id = 7,
+                    Name = "Main site",
+                    ServiceType = "Vite",
+                    WorkingDirectory = "C:\\work\\main",
+                    StartCommand = "npm",
+                    Url = "http://localhost:{port}",
+                },
+                MatchPath = "/app/{**catch-all}",
+                PathTransformMode = "None",
+            },
+        };
+
+        var result = _builder.Build(routes);
+
+        result.Routes.Should().BeEmpty();
+        result.Warnings.Should().Contain(w => w.Contains("MissingPort") && w.Contains("port"));
+    }
+
+    [Fact]
     public void Build_adds_devdeck_metadata_for_linked_service_routes()
     {
         var routes = new[]

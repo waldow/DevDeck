@@ -1,5 +1,6 @@
 using DevDeck.Web.Data.Entities;
 using DevDeck.Web.Options;
+using DevDeck.Web.Services.Commands;
 using Microsoft.Extensions.Options;
 using Yarp.ReverseProxy.Configuration;
 
@@ -8,11 +9,16 @@ namespace DevDeck.Web.Services.Proxy;
 public sealed class ProxyRouteBuilder
 {
     private readonly ProxyDestinationValidator _validator;
+    private readonly CommandTemplateRenderer _renderer;
     private readonly IOptionsMonitor<DevDeckOptions>? _options;
 
-    public ProxyRouteBuilder(ProxyDestinationValidator validator, IOptionsMonitor<DevDeckOptions>? options = null)
+    public ProxyRouteBuilder(
+        ProxyDestinationValidator validator,
+        CommandTemplateRenderer? renderer = null,
+        IOptionsMonitor<DevDeckOptions>? options = null)
     {
         _validator = validator;
+        _renderer = renderer ?? new CommandTemplateRenderer();
         _options = options;
     }
 
@@ -31,14 +37,19 @@ public sealed class ProxyRouteBuilder
                 continue;
             }
 
-            var destinationUrl = route.DestinationUrlOverride ?? route.DevService?.Url;
-            if (string.IsNullOrWhiteSpace(destinationUrl))
+            var destination = ResolveDestination(route);
+            if (string.IsNullOrWhiteSpace(destination.Url))
             {
                 warnings.Add($"[{route.Name}] No destination URL (link a service or set a destination override).");
                 continue;
             }
+            if (destination.UnknownPlaceholders.Count > 0)
+            {
+                warnings.Add($"[{route.Name}] Unknown destination URL placeholder(s): {string.Join(", ", destination.UnknownPlaceholders)}.");
+                continue;
+            }
 
-            destinationUrl = NormalizeDestination(destinationUrl);
+            var destinationUrl = NormalizeDestination(destination.Url);
 
             var validation = _validator.Validate(destinationUrl);
             if (!validation.IsValid)
@@ -143,6 +154,29 @@ public sealed class ProxyRouteBuilder
         return url.EndsWith('/') ? url : url + "/";
     }
 
+    private DestinationResolution ResolveDestination(ProxyRoute route)
+    {
+        var url = !string.IsNullOrWhiteSpace(route.DestinationUrlOverride)
+            ? route.DestinationUrlOverride
+            : route.DevService?.Url;
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return new DestinationResolution(url, Array.Empty<string>());
+        }
+
+        if (route.DevService is null)
+        {
+            return new DestinationResolution(url, Array.Empty<string>());
+        }
+
+        var service = route.DevService;
+        var rendered = _renderer.Render(
+            url,
+            CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.Port, service.WorkingDirectory));
+
+        return new DestinationResolution(rendered.Text, rendered.UnknownPlaceholders);
+    }
+
     private static IReadOnlyDictionary<string, string> BuildMetadata(ProxyRoute route)
     {
         var metadata = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -165,3 +199,5 @@ public sealed record ProxyBuildResult(
     IReadOnlyList<RouteConfig> Routes,
     IReadOnlyList<ClusterConfig> Clusters,
     IReadOnlyList<string> Warnings);
+
+internal sealed record DestinationResolution(string? Url, IReadOnlyList<string> UnknownPlaceholders);

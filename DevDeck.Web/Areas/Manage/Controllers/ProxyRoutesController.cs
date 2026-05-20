@@ -4,6 +4,7 @@ using DevDeck.Web.Areas.Manage.ViewModels;
 using DevDeck.Web.Data;
 using DevDeck.Web.Data.Entities;
 using DevDeck.Web.Options;
+using DevDeck.Web.Services.Commands;
 using DevDeck.Web.Services.Health;
 using DevDeck.Web.Services.Portability;
 using DevDeck.Web.Services.Proxy;
@@ -21,6 +22,7 @@ public sealed class ProxyRoutesController : Controller
     private readonly IDbContextFactory<DevDeckDbContext> _dbFactory;
     private readonly DevDeckProxyConfigProvider _provider;
     private readonly ProxyDestinationValidator _validator;
+    private readonly CommandTemplateRenderer _renderer;
     private readonly PortProbeService _portProbe;
     private readonly IDevDeckProcessManager _manager;
     private readonly IOptions<DevDeckOptions> _options;
@@ -32,6 +34,7 @@ public sealed class ProxyRoutesController : Controller
         IDbContextFactory<DevDeckDbContext> dbFactory,
         DevDeckProxyConfigProvider provider,
         ProxyDestinationValidator validator,
+        CommandTemplateRenderer renderer,
         PortProbeService portProbe,
         IDevDeckProcessManager manager,
         IOptions<DevDeckOptions> options,
@@ -41,6 +44,7 @@ public sealed class ProxyRoutesController : Controller
         _dbFactory = dbFactory;
         _provider = provider;
         _validator = validator;
+        _renderer = renderer;
         _portProbe = portProbe;
         _manager = manager;
         _options = options;
@@ -86,7 +90,7 @@ public sealed class ProxyRoutesController : Controller
             Name = model.Name,
             Enabled = model.Enabled,
             DevServiceId = model.DevServiceId,
-            DestinationUrlOverride = model.DestinationUrlOverride,
+            DestinationUrlOverride = NormalizeOptional(model.DestinationUrlOverride),
             MatchPath = model.MatchPath,
             MatchHostsCsv = model.MatchHostsCsv,
             Order = model.Order,
@@ -157,7 +161,7 @@ public sealed class ProxyRoutesController : Controller
         entity.Name = model.Name;
         entity.Enabled = model.Enabled;
         entity.DevServiceId = model.DevServiceId;
-        entity.DestinationUrlOverride = model.DestinationUrlOverride;
+        entity.DestinationUrlOverride = NormalizeOptional(model.DestinationUrlOverride);
         entity.MatchPath = model.MatchPath;
         entity.MatchHostsCsv = model.MatchHostsCsv;
         entity.Order = model.Order;
@@ -217,7 +221,7 @@ public sealed class ProxyRoutesController : Controller
             .FirstOrDefaultAsync(r => r.Id == id);
         if (entity is null) return NotFound();
 
-        var destinationUrl = entity.DestinationUrlOverride ?? entity.DevService?.Url;
+        var destinationUrl = ResolveDestinationUrl(entity.DestinationUrlOverride, entity.DevService);
         var vm = new ProxyRouteTestViewModel
         {
             Id = entity.Id,
@@ -341,11 +345,39 @@ public sealed class ProxyRoutesController : Controller
             ModelState.AddModelError(nameof(model.MatchPath), reason);
         }
 
-        var destination = model.DestinationUrlOverride;
-        if (string.IsNullOrEmpty(destination) && model.DevServiceId is int sid)
+        var destination = NormalizeOptional(model.DestinationUrlOverride);
+        if (model.DevServiceId is int sid)
         {
             await using var db = await _dbFactory.CreateDbContextAsync();
-            destination = (await db.DevServices.FirstOrDefaultAsync(s => s.Id == sid))?.Url;
+            var service = await db.DevServices.FirstOrDefaultAsync(s => s.Id == sid);
+            if (service is null)
+            {
+                ModelState.AddModelError(nameof(model.DevServiceId), "Selected service was not found.");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(destination))
+            {
+                destination = service.Url;
+            }
+            if (string.IsNullOrWhiteSpace(destination))
+            {
+                ModelState.AddModelError(
+                    nameof(model.DestinationUrlOverride),
+                    "Selected service does not have a URL. Provide a destination URL override.");
+                return;
+            }
+
+            var rendered = RenderServiceUrl(destination, service);
+            if (rendered.UnknownPlaceholders.Count > 0)
+            {
+                ModelState.AddModelError(
+                    nameof(model.DestinationUrlOverride),
+                    $"Destination URL has unknown placeholder(s): {string.Join(", ", rendered.UnknownPlaceholders)}.");
+                return;
+            }
+
+            destination = rendered.Text;
         }
         if (!string.IsNullOrEmpty(destination))
         {
@@ -368,4 +400,26 @@ public sealed class ProxyRoutesController : Controller
             .Select(s => new ServiceOption(s.Id, s.Name, s.Url))
             .ToList();
     }
+
+    private string? ResolveDestinationUrl(string? overrideUrl, DevService? service)
+    {
+        var url = !string.IsNullOrWhiteSpace(overrideUrl) ? overrideUrl : service?.Url;
+        if (string.IsNullOrWhiteSpace(url) || service is null)
+        {
+            return url;
+        }
+
+        var rendered = RenderServiceUrl(url, service);
+        return rendered.UnknownPlaceholders.Count == 0 ? rendered.Text : url;
+    }
+
+    private RenderResult RenderServiceUrl(string url, DevService service)
+    {
+        return _renderer.Render(
+            url,
+            CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.Port, service.WorkingDirectory));
+    }
+
+    private static string? NormalizeOptional(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }
