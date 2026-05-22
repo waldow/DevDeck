@@ -27,7 +27,29 @@ public sealed class RunHistoryRefreshService
         _logger = logger;
     }
 
+    /// <summary>
+    /// Reconciles ServiceRun rows left in an active state (e.g. after an app restart wiped the
+    /// in-memory process dictionary). Best-effort: any failure is logged and swallowed so callers
+    /// — including GET requests that render run history — never fault on a reconciliation error.
+    /// </summary>
     public async Task<int> RefreshActiveRunsAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await RefreshActiveRunsCoreAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to refresh active run history; serving existing rows unchanged");
+            return 0;
+        }
+    }
+
+    private async Task<int> RefreshActiveRunsCoreAsync(CancellationToken cancellationToken)
     {
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
         var activeRuns = await db.ServiceRuns
@@ -54,7 +76,7 @@ public sealed class RunHistoryRefreshService
                     continue;
                 }
 
-                var refreshedStatus = info.Status.ToString();
+                var refreshedStatus = ProcessStatusNames.FromStatus(info.Status);
                 if (!string.Equals(run.Status, refreshedStatus, StringComparison.Ordinal) ||
                     run.StoppedUtc is not null ||
                     run.ProcessId is null)
@@ -92,12 +114,7 @@ public sealed class RunHistoryRefreshService
 
     private static int CompleteRun(Data.Entities.ServiceRun run, DateTimeOffset stoppedUtc, int? exitCode, bool killIssued)
     {
-        var newStatus = run.Status switch
-        {
-            ProcessStatusNames.Stopping => killIssued ? ProcessStatusNames.Killed : ProcessStatusNames.Stopped,
-            _ => exitCode is 0 ? ProcessStatusNames.Stopped : ProcessStatusNames.Crashed,
-        };
-
+        var newStatus = ProcessStatusNames.ResolveExitStatus(run.Status, exitCode, killIssued);
         return ApplyCompletion(run, stoppedUtc, newStatus, exitCode);
     }
 
@@ -163,6 +180,16 @@ public sealed class RunHistoryRefreshService
         }
     }
 
+    // The OS may recycle a PID after our process dies, so a live process with the stored PID is
+    // not necessarily *our* process. DevDeckProcessManager stamps run.StartedUtc immediately before
+    // spawning, so the genuine process's StartTime sits in a tight window around it. We accept only
+    // PIDs whose StartTime falls inside that window: the lower bound (-5s, clock-skew slack) rejects
+    // an older long-lived process that held the PID first; the upper bound (+60s) rejects a newer
+    // process that grabbed the freed PID later. A reused PID can only masquerade as ours if it
+    // happened to start within ~a minute of the original run — vanishingly unlikely in practice.
+    private static readonly TimeSpan ProcessStartLowerSlack = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan ProcessStartUpperSlack = TimeSpan.FromSeconds(60);
+
     private bool IsSameRunProcessStillAlive(int processId, DateTimeOffset runStartedUtc)
     {
         try
@@ -174,7 +201,8 @@ public sealed class RunHistoryRefreshService
             }
 
             var processStartedUtc = new DateTimeOffset(process.StartTime).ToUniversalTime();
-            return processStartedUtc >= runStartedUtc.AddSeconds(-5);
+            return processStartedUtc >= runStartedUtc - ProcessStartLowerSlack &&
+                   processStartedUtc <= runStartedUtc + ProcessStartUpperSlack;
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or NotSupportedException or System.ComponentModel.Win32Exception)
         {

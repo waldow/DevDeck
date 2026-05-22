@@ -416,11 +416,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
 
             run.StoppedUtc = DateTimeOffset.UtcNow;
             run.ExitCode = exitCode;
-            run.Status = run.Status switch
-            {
-                ProcessStatusNames.Stopping => info?.KillIssued == true ? ProcessStatusNames.Killed : ProcessStatusNames.Stopped,
-                _ => exitCode is 0 ? ProcessStatusNames.Stopped : ProcessStatusNames.Crashed,
-            };
+            run.Status = ProcessStatusNames.ResolveExitStatus(run.Status, exitCode, info?.KillIssued == true);
             await db.SaveChangesAsync();
         }
         catch (Exception ex)
