@@ -344,6 +344,34 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
         return new StartProfileResult { ProfileId = profileId, Success = outcomes.All(o => o.Success), Outcomes = outcomes };
     }
 
+    public async Task<StartAllResult> StartAllAsync(CancellationToken cancellationToken)
+    {
+        List<(int Id, string Name)> targets;
+        await using (var db = await _dbFactory.CreateDbContextAsync(cancellationToken))
+        {
+            targets = await db.DevServices
+                .Where(s => s.Enabled)
+                .OrderBy(s => s.DisplayOrder).ThenBy(s => s.Name)
+                .Select(s => new ValueTuple<int, string>(s.Id, s.Name))
+                .ToListAsync(cancellationToken);
+        }
+
+        var outcomes = new List<ServiceActionOutcome>();
+        foreach (var (id, name) in targets)
+        {
+            if (_running.ContainsKey(id)) continue; // already running — skip
+            var result = await StartServiceAsync(id, cancellationToken);
+            outcomes.Add(new ServiceActionOutcome
+            {
+                ServiceId = id,
+                ServiceName = name,
+                Success = result.Success,
+                Message = result.Message ?? result.Error,
+            });
+        }
+        return new StartAllResult { Started = outcomes.Count(o => o.Success), Outcomes = outcomes };
+    }
+
     public async Task<StopAllResult> StopAllAsync(CancellationToken cancellationToken)
     {
         var ids = _running.Keys.ToArray();

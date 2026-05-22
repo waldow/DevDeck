@@ -19,13 +19,22 @@
 
     function updatePill(el, value) {
         if (!el) return;
+        const next = 'pill-' + value.toLowerCase();
+        const cameOnline = next === 'pill-running' && !el.classList.contains('pill-running');
         if (el.textContent.trim() !== value) {
             el.textContent = value;
         }
         for (const c of Array.from(el.classList)) {
             if (c.startsWith('pill-')) el.classList.remove(c);
         }
-        el.classList.add('pill-' + value.toLowerCase());
+        el.classList.add(next);
+        if (cameOnline) {
+            el.classList.remove('online-pop');
+            void el.offsetWidth; // restart the animation
+            el.classList.add('online-pop');
+            el.addEventListener('animationend', () => el.classList.remove('online-pop'), { once: true });
+            el.closest('.service-card')?.classList.remove('igniting');
+        }
     }
 
     setInterval(tick, poll);

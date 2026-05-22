@@ -268,6 +268,9 @@ public sealed class RunHistoryRefreshServiceTests : IDisposable
         public Task<StartProfileResult> StartProfileAsync(int profileId, CancellationToken cancellationToken) =>
             Task.FromResult(new StartProfileResult { ProfileId = profileId, Success = false });
 
+        public Task<StartAllResult> StartAllAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new StartAllResult());
+
         public Task<StopAllResult> StopAllAsync(CancellationToken cancellationToken) =>
             Task.FromResult(new StopAllResult());
 

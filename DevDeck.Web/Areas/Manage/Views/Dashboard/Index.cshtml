@@ -6,6 +6,10 @@
 }
 
 @section Actions {
+    <form class="inline" id="start-all-form" method="post" asp-area="Manage" asp-controller="Services" asp-action="StartAll">
+        @Html.AntiForgeryToken()
+        <button type="submit" class="btn btn-primary" id="start-all-btn"><span class="sa-label">▶&nbsp;Start all</span></button>
+    </form>
     <form class="inline" method="post" asp-area="Manage" asp-controller="Services" asp-action="StopAll">
         @Html.AntiForgeryToken()
         <button type="submit" class="btn btn-warn" onclick="return confirm('Stop all running services?');">Stop all</button>
@@ -25,7 +29,7 @@ else
     <div class="grid-cards" id="cards" data-poll="@Model.PollingMilliseconds">
         @foreach (var card in Model.Cards)
         {
-            <div class="card service-card" data-service-id="@card.Id">
+            <div class="card service-card" data-service-id="@card.Id" data-enabled="@card.Enabled.ToString().ToLowerInvariant()">
                 <div class="sc-head">
                     <div>
                         <div class="sc-name">@card.Name</div>
@@ -75,4 +79,5 @@ else
 
 @section Scripts {
     <script src="~/js/dashboard.js" asp-append-version="true"></script>
+    <script src="~/js/start-all.js" asp-append-version="true"></script>
 }

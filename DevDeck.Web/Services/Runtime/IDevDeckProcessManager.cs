@@ -8,6 +8,7 @@ public interface IDevDeckProcessManager
     Task<StopServiceResult> StopServiceAsync(int serviceId, CancellationToken cancellationToken);
     Task<RestartServiceResult> RestartServiceAsync(int serviceId, CancellationToken cancellationToken);
     Task<StartProfileResult> StartProfileAsync(int profileId, CancellationToken cancellationToken);
+    Task<StartAllResult> StartAllAsync(CancellationToken cancellationToken);
     Task<StopAllResult> StopAllAsync(CancellationToken cancellationToken);
     RunningProcessInfo? GetRunningProcess(int serviceId);
     IReadOnlyCollection<RunningProcessInfo> GetRunningProcesses();

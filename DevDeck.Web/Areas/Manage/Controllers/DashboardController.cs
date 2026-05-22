@@ -54,6 +54,7 @@ public sealed class DashboardController : Controller
                 Id = s.Id,
                 Name = s.Name,
                 ServiceType = s.ServiceType,
+                Enabled = s.Enabled,
                 RuntimeStatus = info?.Status.ToString() ?? "Stopped",
                 HealthStatus = info is null ? "NotRunning" : (hc?.LastStatus ?? "Unknown"),
                 Port = s.Port,

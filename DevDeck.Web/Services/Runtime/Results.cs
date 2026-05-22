@@ -40,6 +40,12 @@ public sealed class StopAllResult
     public List<ServiceActionOutcome> Outcomes { get; init; } = [];
 }
 
+public sealed class StartAllResult
+{
+    public int Started { get; init; }
+    public List<ServiceActionOutcome> Outcomes { get; init; } = [];
+}
+
 public sealed class ServiceActionOutcome
 {
     public int ServiceId { get; init; }

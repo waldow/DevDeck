@@ -265,6 +265,16 @@ public sealed class ServicesController : Controller
     public async Task<IActionResult> Start(int id, CancellationToken cancellationToken)
     {
         var result = await _manager.StartServiceAsync(id, cancellationToken);
+        if (WantsJson())
+        {
+            return Json(new
+            {
+                success = result.Success,
+                serviceId = result.ServiceId,
+                runId = result.RunId,
+                message = result.Message ?? result.Error,
+            });
+        }
         TempData[result.Success ? "Info" : "Error"] = result.Message ?? result.Error;
         return RedirectBackOrDashboard();
     }
@@ -287,6 +297,15 @@ public sealed class ServicesController : Controller
         return RedirectBackOrDashboard();
     }
 
+    [HttpPost("StartAll")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> StartAll(CancellationToken cancellationToken)
+    {
+        var result = await _manager.StartAllAsync(cancellationToken);
+        TempData["Info"] = $"Started {result.Started} services.";
+        return RedirectToAction("Index", "Dashboard");
+    }
+
     [HttpPost("StopAll")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> StopAll(CancellationToken cancellationToken)
@@ -294,6 +313,14 @@ public sealed class ServicesController : Controller
         var result = await _manager.StopAllAsync(cancellationToken);
         TempData["Info"] = $"Stopped {result.Stopped} services.";
         return RedirectToAction("Index", "Dashboard");
+    }
+
+    private bool WantsJson()
+    {
+        if (string.Equals(Request.Headers.XRequestedWith, "XMLHttpRequest", StringComparison.OrdinalIgnoreCase))
+            return true;
+        var accept = Request.Headers.Accept.ToString();
+        return accept.Contains("application/json", StringComparison.OrdinalIgnoreCase);
     }
 
     [HttpGet("Export")]
