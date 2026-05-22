@@ -1,5 +1,6 @@
 using DevDeck.Web.Areas.Manage.ViewModels;
 using DevDeck.Web.Data;
+using DevDeck.Web.Services.Runtime;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -10,16 +11,22 @@ namespace DevDeck.Web.Areas.Manage.Controllers;
 public sealed class RunsController : Controller
 {
     private readonly IDbContextFactory<DevDeckDbContext> _dbFactory;
+    private readonly RunHistoryRefreshService _runHistoryRefresh;
 
-    public RunsController(IDbContextFactory<DevDeckDbContext> dbFactory)
+    public RunsController(
+        IDbContextFactory<DevDeckDbContext> dbFactory,
+        RunHistoryRefreshService runHistoryRefresh)
     {
         _dbFactory = dbFactory;
+        _runHistoryRefresh = runHistoryRefresh;
     }
 
     [HttpGet("")]
-    public async Task<IActionResult> Index([FromQuery] int? serviceId = null, [FromQuery] string? status = null)
+    public async Task<IActionResult> Index([FromQuery] int? serviceId = null, [FromQuery] string? status = null, CancellationToken cancellationToken = default)
     {
-        await using var db = await _dbFactory.CreateDbContextAsync();
+        await _runHistoryRefresh.RefreshActiveRunsAsync(cancellationToken);
+
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
         var query = db.ServiceRuns.Include(r => r.DevService).AsQueryable();
         if (serviceId is int id) query = query.Where(r => r.DevServiceId == id);
         if (!string.IsNullOrEmpty(status)) query = query.Where(r => r.Status == status);
@@ -27,7 +34,7 @@ public sealed class RunsController : Controller
         var runs = await query
             .OrderByDescending(r => r.StartedUtc)
             .Take(200)
-            .ToListAsync();
+            .ToListAsync(cancellationToken);
 
         var items = runs.Select(r => new RunsListItem
         {
@@ -41,17 +48,19 @@ public sealed class RunsController : Controller
             LogFilePath = r.LogFilePath,
         }).ToList();
 
-        ViewBag.Services = await db.DevServices.OrderBy(s => s.Name).ToListAsync();
+        ViewBag.Services = await db.DevServices.OrderBy(s => s.Name).ToListAsync(cancellationToken);
         ViewBag.SelectedServiceId = serviceId;
         ViewBag.SelectedStatus = status;
         return View(items);
     }
 
     [HttpGet("Details/{id:long}")]
-    public async Task<IActionResult> Details(long id)
+    public async Task<IActionResult> Details(long id, CancellationToken cancellationToken)
     {
-        await using var db = await _dbFactory.CreateDbContextAsync();
-        var run = await db.ServiceRuns.Include(r => r.DevService).FirstOrDefaultAsync(r => r.Id == id);
+        await _runHistoryRefresh.RefreshActiveRunsAsync(cancellationToken);
+
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        var run = await db.ServiceRuns.Include(r => r.DevService).FirstOrDefaultAsync(r => r.Id == id, cancellationToken);
         if (run is null) return NotFound();
         return View(new RunDetailsViewModel { Run = run, ServiceName = run.DevService?.Name ?? string.Empty });
     }

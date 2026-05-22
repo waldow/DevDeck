@@ -31,6 +31,7 @@ builder.Services.AddSingleton<ProcessLogBuffer>();
 builder.Services.AddSingleton<HealthStatusCache>();
 builder.Services.AddSingleton<DevDeckProcessManager>();
 builder.Services.AddSingleton<IDevDeckProcessManager>(sp => sp.GetRequiredService<DevDeckProcessManager>());
+builder.Services.AddSingleton<RunHistoryRefreshService>();
 builder.Services.AddSingleton<PortProbeService>();
 builder.Services.AddSingleton<ProxyDestinationValidator>();
 builder.Services.AddSingleton<ProxyRouteBuilder>();
