@@ -63,6 +63,27 @@ public sealed class CommandExecutableResolverTests
     }
 
     [Fact]
+    public void ResolveForLaunch_prefers_windows_path_extension_over_extensionless_shim()
+    {
+        var temp = Directory.CreateTempSubdirectory("devdeck-resolver-");
+        try
+        {
+            var shim = Path.Combine(temp.FullName, "azurite");
+            var cmd = Path.Combine(temp.FullName, "azurite.cmd");
+            File.WriteAllText(shim, "#!/bin/sh");
+            File.WriteAllText(cmd, "@echo off");
+
+            var r = new CommandExecutableResolver(isWindows: true);
+
+            r.ResolveForLaunch("azurite", temp.FullName).Should().Be(Path.GetFullPath(cmd));
+        }
+        finally
+        {
+            temp.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public void ResolveForLaunch_does_not_path_search_explicit_relative_path()
     {
         var temp = Directory.CreateTempSubdirectory("devdeck-resolver-");

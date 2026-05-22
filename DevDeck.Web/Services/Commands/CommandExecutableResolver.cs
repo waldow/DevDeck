@@ -111,17 +111,20 @@ public sealed class CommandExecutableResolver
 
     private IEnumerable<string> CandidateNames(string command)
     {
-        yield return command;
-
         if (!_isWindows || Path.HasExtension(command))
         {
+            yield return command;
             yield break;
         }
 
+        // Prefer Windows-launchable PATHEXT shims before extensionless npm shims
+        // such as "azurite", which are not valid ProcessStartInfo targets.
         foreach (var extension in WindowsPathExtensions())
         {
             yield return command + extension;
         }
+
+        yield return command;
     }
 
     private static IEnumerable<string> WindowsPathExtensions()
@@ -132,6 +135,8 @@ public sealed class CommandExecutableResolver
             value = ".COM;.EXE;.BAT;.CMD";
         }
 
-        return value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return value
+            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(extension => extension.ToLowerInvariant());
     }
 }
