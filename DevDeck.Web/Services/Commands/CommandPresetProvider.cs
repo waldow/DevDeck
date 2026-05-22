@@ -20,7 +20,11 @@ public sealed class CommandPresetProvider
                 StartArguments: "start --port {port}",
                 DefaultPort: 7071,
                 UrlTemplate: "http://localhost:{port}",
-                HealthCheckUrlTemplate: "http://localhost:{port}"
+                HealthCheckUrlTemplate: "http://localhost:{port}",
+                DefaultEnvironment:
+                [
+                    new KeyValuePair<string, string>("AzureWebJobsStorage", "UseDevelopmentStorage=true")
+                ]
             ),
             new CommandPreset(
                 Key: "ReactVite",

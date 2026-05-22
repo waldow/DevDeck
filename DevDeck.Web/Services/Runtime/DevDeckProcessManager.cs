@@ -28,6 +28,9 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
     private readonly ILogger<DevDeckProcessManager> _logger;
 
     private const string AzureFunctionServiceType = "AzureFunction";
+    private const string AzureFunctionsServiceType = "AzureFunctions";
+    private const string AzureWebJobsStorageKey = "AzureWebJobsStorage";
+    private const string AzureWebJobsStorageDevelopmentValue = "UseDevelopmentStorage=true";
 
     private static readonly TimeSpan PostStartHealthWarmup = TimeSpan.FromSeconds(15);
 
@@ -104,6 +107,8 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
             var renderedEnvironment = service.EnvironmentVariables
                 .Select(env => new RenderedEnvironmentVariable(env.Key, _renderer.Render(env.Value, values).Text, env.IsSecret))
                 .ToList();
+            var isAzureFunction = IsAzureFunctionServiceType(service.ServiceType);
+            AddAzureFunctionsDefaults(renderedEnvironment, isAzureFunction);
             var launchCommand = _resolver.ResolveForLaunch(service.StartCommand, EffectivePathValue(renderedEnvironment));
 
             var run = new ServiceRun
@@ -124,7 +129,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
 
             // Azure Functions need AzureWebJobsStorage (Azurite locally) and fail on startup
             // without it — ensure the emulator is healthy before launching the Functions host.
-            if (string.Equals(service.ServiceType, AzureFunctionServiceType, StringComparison.OrdinalIgnoreCase))
+            if (isAzureFunction)
             {
                 AppendSystemLine(service.Id, run.Id, logPath, "Ensuring Azurite storage emulator is running...");
                 var azurite = await _azuriteSupervisor.EnsureRunningAsync(
@@ -485,6 +490,24 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
     {
         var pathOverride = environment.LastOrDefault(e => string.Equals(e.Key, "PATH", StringComparison.OrdinalIgnoreCase));
         return pathOverride?.Value ?? Environment.GetEnvironmentVariable("PATH");
+    }
+
+    private static bool IsAzureFunctionServiceType(string serviceType) =>
+        string.Equals(serviceType, AzureFunctionServiceType, StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(serviceType, AzureFunctionsServiceType, StringComparison.OrdinalIgnoreCase);
+
+    private static void AddAzureFunctionsDefaults(List<RenderedEnvironmentVariable> environment, bool isAzureFunction)
+    {
+        if (!isAzureFunction ||
+            environment.Any(e => string.Equals(e.Key, AzureWebJobsStorageKey, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        environment.Add(new RenderedEnvironmentVariable(
+            AzureWebJobsStorageKey,
+            AzureWebJobsStorageDevelopmentValue,
+            IsSecret: false));
     }
 
     private static string FormatEnvironmentOverrides(IReadOnlyCollection<RenderedEnvironmentVariable> environment)

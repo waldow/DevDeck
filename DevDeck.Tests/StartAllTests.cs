@@ -53,6 +53,64 @@ public sealed class StartAllTests : IDisposable
         result.Outcomes.Should().OnlyContain(o => !o.Success && o.Message!.Contains("Working directory does not exist"));
     }
 
+    [Fact]
+    public async Task AzureFunctions_start_injects_development_storage_and_runs_azurite_preflight()
+    {
+        var temp = Directory.CreateTempSubdirectory("devdeck-azure-functions-");
+        try
+        {
+            var serviceId = await SeedRunnableServiceAsync("func-plural-" + Guid.NewGuid().ToString("N"), temp.FullName, "AzureFunctions");
+            var azurite = new StubAzuriteSupervisor();
+            var manager = CreateManager(azurite);
+
+            var result = await manager.StartServiceAsync(serviceId, CancellationToken.None);
+
+            result.Success.Should().BeTrue();
+            azurite.Calls.Should().Be(1);
+            await WaitForProcessExitAsync(manager, serviceId);
+
+            var log = await ReadRunLogAsync(result.RunId!.Value);
+            log.Should().Contain("Ensuring Azurite storage emulator is running...");
+            log.Should().Contain("Environment overrides: AzureWebJobsStorage=UseDevelopmentStorage=true");
+        }
+        finally
+        {
+            temp.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task AzureFunction_start_preserves_explicit_storage_override()
+    {
+        var temp = Directory.CreateTempSubdirectory("devdeck-azure-functions-");
+        try
+        {
+            var serviceId = await SeedRunnableServiceAsync(
+                "func-custom-storage-" + Guid.NewGuid().ToString("N"),
+                temp.FullName,
+                "AzureFunction",
+                new ServiceEnvironmentVariable
+                {
+                    Key = "AzureWebJobsStorage",
+                    Value = "UseDevelopmentStorage=true;CustomEndpoint=http://localhost:11000",
+                    IsSecret = false,
+                });
+
+            var manager = CreateManager(new StubAzuriteSupervisor());
+            var result = await manager.StartServiceAsync(serviceId, CancellationToken.None);
+
+            result.Success.Should().BeTrue();
+            await WaitForProcessExitAsync(manager, serviceId);
+            var log = await ReadRunLogAsync(result.RunId!.Value);
+            log.Should().Contain("AzureWebJobsStorage=UseDevelopmentStorage=true;CustomEndpoint=http://localhost:11000");
+            log.Should().NotContain("AzureWebJobsStorage=UseDevelopmentStorage=true,");
+        }
+        finally
+        {
+            temp.Delete(recursive: true);
+        }
+    }
+
     private async Task<int> SeedServiceAsync(string name, int displayOrder, bool enabled)
     {
         await using var db = _factory.CreateDbContext();
@@ -70,7 +128,50 @@ public sealed class StartAllTests : IDisposable
         return service.Id;
     }
 
-    private DevDeckProcessManager CreateManager()
+    private async Task<int> SeedRunnableServiceAsync(
+        string name,
+        string workingDirectory,
+        string serviceType,
+        params ServiceEnvironmentVariable[] environmentVariables)
+    {
+        await using var db = _factory.CreateDbContext();
+        var service = new DevService
+        {
+            Name = name,
+            ServiceType = serviceType,
+            WorkingDirectory = workingDirectory,
+            StartCommand = "dotnet",
+            StartArguments = "--version",
+            Enabled = true,
+        };
+        service.EnvironmentVariables.AddRange(environmentVariables);
+        db.DevServices.Add(service);
+        await db.SaveChangesAsync();
+        return service.Id;
+    }
+
+    private async Task<string> ReadRunLogAsync(long runId)
+    {
+        await using var db = _factory.CreateDbContext();
+        var run = await db.ServiceRuns.SingleAsync(r => r.Id == runId);
+        run.LogFilePath.Should().NotBeNull();
+        await using var stream = new FileStream(run.LogFilePath!, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(stream);
+        return await reader.ReadToEndAsync();
+    }
+
+    private static async Task WaitForProcessExitAsync(DevDeckProcessManager manager, int serviceId)
+    {
+        var process = manager.GetRunningProcess(serviceId)?.Process;
+        if (process is null)
+        {
+            return;
+        }
+
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    private DevDeckProcessManager CreateManager(StubAzuriteSupervisor? azurite = null)
     {
         var options = new DevDeckOptions { DevelopmentOnly = false }; // allow execution outside Development
         return new DevDeckProcessManager(
@@ -82,14 +183,20 @@ public sealed class StartAllTests : IDisposable
             new TestOptionsMonitor<DevDeckOptions>(options),
             new TestWebHostEnvironment(),
             new HealthStatusCache(),
-            new StubAzuriteSupervisor(),
+            azurite ?? new StubAzuriteSupervisor(),
             NullLogger<DevDeckProcessManager>.Instance);
     }
 
     private sealed class StubAzuriteSupervisor : IAzuriteSupervisor
     {
-        public Task<AzuriteReadyResult> EnsureRunningAsync(Action<string> log, CancellationToken cancellationToken) =>
-            Task.FromResult(new AzuriteReadyResult(true));
+        public int Calls { get; private set; }
+
+        public Task<AzuriteReadyResult> EnsureRunningAsync(Action<string> log, CancellationToken cancellationToken)
+        {
+            Calls++;
+            log("Azurite test stub is ready.");
+            return Task.FromResult(new AzuriteReadyResult(true));
+        }
     }
 
     private sealed class TestOptionsMonitor<T> : IOptionsMonitor<T>
