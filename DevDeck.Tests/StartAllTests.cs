@@ -82,7 +82,14 @@ public sealed class StartAllTests : IDisposable
             new TestOptionsMonitor<DevDeckOptions>(options),
             new TestWebHostEnvironment(),
             new HealthStatusCache(),
+            new StubAzuriteSupervisor(),
             NullLogger<DevDeckProcessManager>.Instance);
+    }
+
+    private sealed class StubAzuriteSupervisor : IAzuriteSupervisor
+    {
+        public Task<AzuriteReadyResult> EnsureRunningAsync(Action<string> log, CancellationToken cancellationToken) =>
+            Task.FromResult(new AzuriteReadyResult(true));
     }
 
     private sealed class TestOptionsMonitor<T> : IOptionsMonitor<T>

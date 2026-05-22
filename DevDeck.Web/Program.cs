@@ -29,6 +29,7 @@ builder.Services.AddSingleton<CommandPresetProvider>();
 builder.Services.AddSingleton<LogFileWriter>();
 builder.Services.AddSingleton<ProcessLogBuffer>();
 builder.Services.AddSingleton<HealthStatusCache>();
+builder.Services.AddSingleton<IAzuriteSupervisor, AzuriteSupervisor>();
 builder.Services.AddSingleton<DevDeckProcessManager>();
 builder.Services.AddSingleton<IDevDeckProcessManager>(sp => sp.GetRequiredService<DevDeckProcessManager>());
 builder.Services.AddSingleton<RunHistoryRefreshService>();

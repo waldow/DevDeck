@@ -24,7 +24,10 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
     private readonly IOptionsMonitor<DevDeckOptions> _options;
     private readonly IWebHostEnvironment _environment;
     private readonly HealthStatusCache _healthStatusCache;
+    private readonly IAzuriteSupervisor _azuriteSupervisor;
     private readonly ILogger<DevDeckProcessManager> _logger;
+
+    private const string AzureFunctionServiceType = "AzureFunction";
 
     private static readonly TimeSpan PostStartHealthWarmup = TimeSpan.FromSeconds(15);
 
@@ -37,6 +40,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
         IOptionsMonitor<DevDeckOptions> options,
         IWebHostEnvironment environment,
         HealthStatusCache healthStatusCache,
+        IAzuriteSupervisor azuriteSupervisor,
         ILogger<DevDeckProcessManager> logger)
     {
         _dbFactory = dbFactory;
@@ -47,6 +51,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
         _options = options;
         _environment = environment;
         _healthStatusCache = healthStatusCache;
+        _azuriteSupervisor = azuriteSupervisor;
         _logger = logger;
     }
 
@@ -116,6 +121,24 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
             var logPath = DevDeckPaths.LogFilePathFor(service.Name, run.Id, run.StartedUtc);
             run.LogFilePath = logPath;
             await db.SaveChangesAsync(cancellationToken);
+
+            // Azure Functions need AzureWebJobsStorage (Azurite locally) and fail on startup
+            // without it — ensure the emulator is healthy before launching the Functions host.
+            if (string.Equals(service.ServiceType, AzureFunctionServiceType, StringComparison.OrdinalIgnoreCase))
+            {
+                AppendSystemLine(service.Id, run.Id, logPath, "Ensuring Azurite storage emulator is running...");
+                var azurite = await _azuriteSupervisor.EnsureRunningAsync(
+                    msg => AppendSystemLine(service.Id, run.Id, logPath, msg), cancellationToken);
+                if (!azurite.Success)
+                {
+                    run.Status = ProcessStatusNames.FailedToStart;
+                    run.StoppedUtc = DateTimeOffset.UtcNow;
+                    run.LastError = azurite.Error;
+                    await db.SaveChangesAsync(cancellationToken);
+                    AppendSystemLine(service.Id, run.Id, logPath, $"Azurite not ready: {azurite.Error}");
+                    return new StartServiceResult { ServiceId = serviceId, RunId = run.Id, Success = false, Error = azurite.Error };
+                }
+            }
 
             var psi = new ProcessStartInfo
             {
