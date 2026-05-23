@@ -33,6 +33,12 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
     private const string AzureWebJobsStorageDevelopmentValue = "UseDevelopmentStorage=true";
 
     private static readonly TimeSpan PostStartHealthWarmup = TimeSpan.FromSeconds(15);
+    private static readonly string[] ActiveStatuses =
+    [
+        ProcessStatusNames.Starting,
+        ProcessStatusNames.Running,
+        ProcessStatusNames.Stopping,
+    ];
 
     public DevDeckProcessManager(
         IDbContextFactory<DevDeckDbContext> dbFactory,
@@ -270,7 +276,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
         {
             if (!_running.TryGetValue(serviceId, out var info))
             {
-                return new StopServiceResult { ServiceId = serviceId, Success = false, Error = "Service is not running." };
+                return await StopOrphanedServiceRunAsync(serviceId, cancellationToken);
             }
 
             info.Status = ProcessStatus.Stopping;
@@ -402,16 +408,30 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
 
     public async Task<StopAllResult> StopAllAsync(CancellationToken cancellationToken)
     {
-        var ids = _running.Keys.ToArray();
+        var targets = _running.Values.ToDictionary(r => r.DevServiceId, r => r.ServiceName);
+        await using (var db = await _dbFactory.CreateDbContextAsync(cancellationToken))
+        {
+            var orphanedServiceRuns = await db.ServiceRuns
+                .Include(r => r.DevService)
+                .Where(r => ActiveStatuses.Contains(r.Status) && r.ProcessId != null)
+                .OrderByDescending(r => r.StartedUtc)
+                .ToListAsync(cancellationToken);
+
+            foreach (var run in orphanedServiceRuns)
+            {
+                targets.TryAdd(run.DevServiceId, run.DevService?.Name ?? run.DevServiceId.ToString());
+            }
+        }
+
         var outcomes = new List<ServiceActionOutcome>();
-        foreach (var id in ids)
+        foreach (var (id, name) in targets.OrderBy(t => t.Value, StringComparer.OrdinalIgnoreCase))
         {
             var info = _running.TryGetValue(id, out var existing) ? existing : null;
             var result = await StopServiceAsync(id, cancellationToken);
             outcomes.Add(new ServiceActionOutcome
             {
                 ServiceId = id,
-                ServiceName = info?.ServiceName ?? id.ToString(),
+                ServiceName = info?.ServiceName ?? name,
                 Success = result.Success,
                 Message = result.Message ?? result.Error,
             });
@@ -435,6 +455,87 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
 
     private void AppendSystemLine(int serviceId, long runId, string logPath, string text) =>
         WriteLine(serviceId, runId, logPath, "SYS", text);
+
+    private void AppendOptionalSystemLine(int serviceId, long runId, string? logPath, string text)
+    {
+        if (!string.IsNullOrWhiteSpace(logPath))
+        {
+            AppendSystemLine(serviceId, runId, logPath, text);
+        }
+    }
+
+    private async Task<StopServiceResult> StopOrphanedServiceRunAsync(int serviceId, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        var activeRuns = await db.ServiceRuns
+            .Where(r => r.DevServiceId == serviceId && ActiveStatuses.Contains(r.Status) && r.ProcessId != null)
+            .OrderByDescending(r => r.StartedUtc)
+            .ToListAsync(cancellationToken);
+
+        foreach (var run in activeRuns)
+        {
+            using var process = RunProcessMatcher.TryGetSameRunProcess(
+                run.ProcessId!.Value,
+                run.StartedUtc,
+                ex => _logger.LogDebug(ex, "Could not inspect orphaned process {ProcessId} for service {ServiceId}", run.ProcessId, serviceId));
+
+            if (process is null)
+            {
+                continue;
+            }
+
+            AppendOptionalSystemLine(serviceId, run.Id, run.LogFilePath, $"Stop requested for orphaned process PID {run.ProcessId}");
+            run.Status = ProcessStatusNames.Stopping;
+            run.StoppedUtc = null;
+            await db.SaveChangesAsync(cancellationToken);
+
+            var killed = false;
+            var exited = SafeHasExited(process);
+            try
+            {
+                if (!exited)
+                {
+                    killed = true;
+                    AppendOptionalSystemLine(serviceId, run.Id, run.LogFilePath, "Killing orphaned process tree");
+                    process.Kill(entireProcessTree: true);
+                    exited = await WaitForExitAsync(process, TimeSpan.FromSeconds(2), cancellationToken);
+                }
+            }
+            catch (Exception ex)
+            {
+                AppendOptionalSystemLine(serviceId, run.Id, run.LogFilePath, $"Error stopping orphaned process: {ex.Message}");
+                _logger.LogWarning(ex, "Failed to stop orphaned process {ProcessId} for service {ServiceId}", run.ProcessId, serviceId);
+            }
+
+            if (exited || SafeHasExited(process))
+            {
+                var exitCode = TryGetExitCode(process);
+                run.StoppedUtc = DateTimeOffset.UtcNow;
+                run.ExitCode = exitCode;
+                run.Status = killed ? ProcessStatusNames.Killed : ProcessStatusNames.Stopped;
+                await db.SaveChangesAsync(cancellationToken);
+                AppendOptionalSystemLine(serviceId, run.Id, run.LogFilePath, $"Orphaned process stopped with code {exitCode?.ToString() ?? "?"}");
+                return new StopServiceResult
+                {
+                    ServiceId = serviceId,
+                    RunId = run.Id,
+                    Success = true,
+                    Message = $"Stopped orphaned PID {run.ProcessId}",
+                };
+            }
+
+            await db.SaveChangesAsync(cancellationToken);
+            return new StopServiceResult
+            {
+                ServiceId = serviceId,
+                RunId = run.Id,
+                Success = false,
+                Error = "Timed out waiting for orphaned process to exit",
+            };
+        }
+
+        return new StopServiceResult { ServiceId = serviceId, Success = false, Error = "Service is not running." };
+    }
 
     private void AppendLaunchDiagnostics(
         int serviceId,
@@ -484,6 +585,16 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
     private static int? SafePid(Process p)
     {
         try { return p.Id; } catch { return null; }
+    }
+
+    private static bool SafeHasExited(Process p)
+    {
+        try { return p.HasExited; } catch { return true; }
+    }
+
+    private static int? TryGetExitCode(Process p)
+    {
+        try { return p.ExitCode; } catch { return null; }
     }
 
     private static string? EffectivePathValue(IReadOnlyCollection<RenderedEnvironmentVariable> environment)

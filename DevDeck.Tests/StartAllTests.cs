@@ -7,6 +7,7 @@ using DevDeck.Web.Services.Logs;
 using DevDeck.Web.Services.Runtime;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
+using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -111,6 +112,48 @@ public sealed class StartAllTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task StopAll_stops_orphaned_run_processes_recorded_in_history()
+    {
+        var process = StartLiveProcess();
+        try
+        {
+            var serviceId = await SeedRunnableServiceAsync(
+                "orphaned-" + Guid.NewGuid().ToString("N"),
+                AppContext.BaseDirectory,
+                "Custom");
+            var runId = await SeedActiveRunAsync(serviceId, process.Id, DateTimeOffset.UtcNow);
+            var manager = CreateManager();
+
+            var result = await manager.StopAllAsync(CancellationToken.None);
+
+            result.Stopped.Should().Be(1);
+            result.Outcomes.Should().ContainSingle(o => o.ServiceId == serviceId && o.Success);
+            process.HasExited.Should().BeTrue();
+
+            await using var db = _factory.CreateDbContext();
+            var run = await db.ServiceRuns.SingleAsync(r => r.Id == runId);
+            run.Status.Should().Be(ProcessStatusNames.Killed);
+            run.StoppedUtc.Should().NotBeNull();
+        }
+        finally
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch
+            {
+                // best effort cleanup
+            }
+
+            process.Dispose();
+        }
+    }
+
     private async Task<int> SeedServiceAsync(string name, int displayOrder, bool enabled)
     {
         await using var db = _factory.CreateDbContext();
@@ -148,6 +191,32 @@ public sealed class StartAllTests : IDisposable
         db.DevServices.Add(service);
         await db.SaveChangesAsync();
         return service.Id;
+    }
+
+    private async Task<long> SeedActiveRunAsync(int serviceId, int processId, DateTimeOffset startedUtc)
+    {
+        await using var db = _factory.CreateDbContext();
+        var run = new ServiceRun
+        {
+            DevServiceId = serviceId,
+            StartedUtc = startedUtc,
+            ProcessId = processId,
+            Status = ProcessStatusNames.Running,
+        };
+        db.ServiceRuns.Add(run);
+        await db.SaveChangesAsync();
+        return run.Id;
+    }
+
+    private static Process StartLiveProcess()
+    {
+        var psi = OperatingSystem.IsWindows()
+            ? new ProcessStartInfo("cmd.exe", "/c pause")
+            : new ProcessStartInfo("/bin/sh", "-c \"sleep 30\"");
+        psi.UseShellExecute = false;
+        psi.CreateNoWindow = true;
+        psi.RedirectStandardInput = true;
+        return Process.Start(psi)!;
     }
 
     private async Task<string> ReadRunLogAsync(long runId)

@@ -89,7 +89,10 @@ public sealed class RunHistoryRefreshService
                 continue;
             }
 
-            if (run.ProcessId is int pid && IsSameRunProcessStillAlive(pid, run.StartedUtc))
+            if (run.ProcessId is int pid && RunProcessMatcher.IsSameRunProcessStillAlive(
+                    pid,
+                    run.StartedUtc,
+                    ex => _logger.LogDebug(ex, "Could not inspect process {ProcessId} while refreshing run history", pid)))
             {
                 if (!string.Equals(run.Status, ProcessStatusNames.Running, StringComparison.Ordinal) ||
                     run.StoppedUtc is not null)
@@ -180,34 +183,4 @@ public sealed class RunHistoryRefreshService
         }
     }
 
-    // The OS may recycle a PID after our process dies, so a live process with the stored PID is
-    // not necessarily *our* process. DevDeckProcessManager stamps run.StartedUtc immediately before
-    // spawning, so the genuine process's StartTime sits in a tight window around it. We accept only
-    // PIDs whose StartTime falls inside that window: the lower bound (-5s, clock-skew slack) rejects
-    // an older long-lived process that held the PID first; the upper bound (+60s) rejects a newer
-    // process that grabbed the freed PID later. A reused PID can only masquerade as ours if it
-    // happened to start within ~a minute of the original run — vanishingly unlikely in practice.
-    private static readonly TimeSpan ProcessStartLowerSlack = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan ProcessStartUpperSlack = TimeSpan.FromSeconds(60);
-
-    private bool IsSameRunProcessStillAlive(int processId, DateTimeOffset runStartedUtc)
-    {
-        try
-        {
-            using var process = Process.GetProcessById(processId);
-            if (process.HasExited)
-            {
-                return false;
-            }
-
-            var processStartedUtc = new DateTimeOffset(process.StartTime).ToUniversalTime();
-            return processStartedUtc >= runStartedUtc - ProcessStartLowerSlack &&
-                   processStartedUtc <= runStartedUtc + ProcessStartUpperSlack;
-        }
-        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or NotSupportedException or System.ComponentModel.Win32Exception)
-        {
-            _logger.LogDebug(ex, "Could not inspect process {ProcessId} while refreshing run history", processId);
-            return false;
-        }
-    }
 }
