@@ -192,10 +192,13 @@ DevDeck.Web/
     Proxy/              DevDeckProxyConfigProvider + ProxyRouteBuilder + ReservedPaths
     Commands/           Presets, executable resolver, template renderer
     Portability/        JSON import/export of services, profiles, routes
-  wwwroot/              devdeck.css design system + dashboard/logs JS
+  wwwroot/              devdeck.css design system, brand/favicon assets, dashboard/logs JS
   Migrations/           EF Core SQLite migrations
 DevDeck.Tests/          xUnit unit tests
 ```
+
+Brand assets live under `DevDeck.Web/wwwroot`: the favicon variants are at the root, and the DevDeck logo/icon
+PNGs are in `DevDeck.Web/wwwroot/images`.
 
 **Storage layout** — the separation is deliberate and load-bearing:
 

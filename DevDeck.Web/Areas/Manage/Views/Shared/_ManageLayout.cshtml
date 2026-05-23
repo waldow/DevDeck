@@ -8,16 +8,22 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>@(ViewData["Title"] ?? "DevDeck")</title>
+    <link rel="icon" href="~/favicon.ico" sizes="any" asp-append-version="true" />
+    <link rel="icon" type="image/png" sizes="32x32" href="~/favicon-32x32.png" asp-append-version="true" />
+    <link rel="icon" type="image/png" sizes="16x16" href="~/favicon-16x16.png" asp-append-version="true" />
+    <link rel="apple-touch-icon" sizes="180x180" href="~/apple-touch-icon.png" asp-append-version="true" />
     <link rel="stylesheet" href="~/css/devdeck.css" asp-append-version="true" />
 </head>
 <body>
     <div class="app">
         <aside class="sidebar">
             <div class="brand">
-                <div class="brand-mark">DD</div>
-                <div>
+                <div class="brand-logo">
+                    <img class="brand-logo-img" src="~/images/devdeck-icon.png" asp-append-version="true" alt="DevDeck logo" width="40" height="40" />
+                </div>
+                <div class="brand-lockup">
                     <div class="brand-name">DevDeck</div>
-                    <div class="brand-sub">local stack</div>
+                    <div class="brand-sub">LOCAL STACK</div>
                 </div>
             </div>
             <div class="nav-section">Stack</div>
