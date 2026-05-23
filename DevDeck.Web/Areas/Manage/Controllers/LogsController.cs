@@ -65,7 +65,16 @@ public sealed class LogsController : Controller
         {
             return NotFound();
         }
-        var bytes = await System.IO.File.ReadAllBytesAsync(run.LogFilePath);
-        return File(bytes, "text/plain", Path.GetFileName(run.LogFilePath));
+        // Open with FileShare.ReadWrite so a still-running service (whose LogFileWriter holds
+        // an open FileAccess.Write handle) doesn't cause a sharing violation. The framework
+        // disposes the returned stream after streaming it to the response.
+        var stream = new FileStream(
+            run.LogFilePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            bufferSize: 4096,
+            useAsync: true);
+        return File(stream, "text/plain", Path.GetFileName(run.LogFilePath));
     }
 }
