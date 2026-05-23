@@ -343,3 +343,75 @@ dialog.import-dlg p { margin: 0; font-size: 12.5px; }
     .service-card.launch-failed { animation: none; }
     .flash-transient, .flash-transient.flash-leaving { animation: none; }
 }
+
+/* ---------------------------------------------------------------- */
+/* Services — live management table                                 */
+/* ---------------------------------------------------------------- */
+
+/* A row mid-ignition: an accent rail down the first cell + a soft
+   breathing glow. Rows can't use the card's clipped sweep, so the
+   "alive" feeling comes from a box-shadow/background pulse instead. */
+table.tbl tr.svc-row { transition: background 160ms; }
+table.tbl tr.igniting > td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+table.tbl tr.igniting { animation: row-ignite 1.1s ease-in-out infinite; }
+@keyframes row-ignite {
+    0%, 100% { background: transparent; }
+    50% { background: rgba(110, 231, 255, 0.07); }
+}
+table.tbl tr.launch-failed > td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
+table.tbl tr.launch-failed { animation: row-fail 900ms ease-out; }
+@keyframes row-fail {
+    0% { background: rgba(248, 113, 113, 0.18); }
+    100% { background: transparent; }
+}
+
+/* Status cell: runtime + health pills side by side. */
+.status-cell { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+/* Port held by a foreign process. */
+.port-conflict {
+    display: inline-flex; align-items: center; gap: 4px; margin-left: 6px;
+    color: var(--warn); font-size: 11px; cursor: help;
+}
+.port-conflict::before { content: "⚠"; }
+
+/* Action groups in a table row — JS toggles which is shown by state. */
+.row-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.row-actions[hidden] { display: none; }
+
+/* ---------------------------------------------------------------- */
+/* Form helpers (retire inline styles on Edit/Details)              */
+/* ---------------------------------------------------------------- */
+.cols-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 760px) { .cols-2 { grid-template-columns: 1fr; } }
+.inline-checks { flex-direction: row; gap: 18px; align-items: center; }
+.inline-checks label { padding-top: 0; }
+.ml-auto { margin-left: auto; }
+.mt-md { margin-top: 18px; }
+.empty-pad { padding: 18px; }
+.row-removed { display: none; }
+
+/* Compact icon buttons inside table rows (remove ✕ / reveal 👁). */
+.icon-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; padding: 0; font-size: 13px; line-height: 1;
+    border-radius: var(--radius-sm); border: 1px solid var(--border);
+    background: var(--bg-elev-2); color: var(--text-dim); cursor: pointer;
+    transition: background 120ms, color 120ms, border-color 120ms;
+}
+.icon-btn:hover { background: var(--bg-elev-3); color: var(--text); }
+.icon-btn.danger:hover { color: var(--bad); border-color: rgba(248,113,113,0.35); }
+.icon-btn.is-on { color: var(--accent); border-color: rgba(110,231,255,0.35); }
+.cell-actions { width: 1%; white-space: nowrap; }
+td.cell-value { position: relative; }
+td.cell-value .reveal { position: absolute; top: 50%; right: 18px; transform: translateY(-50%); }
+td.cell-value input { padding-right: 40px; }
+
+/* Live URL preview under the URL field on Edit. */
+.url-preview { color: var(--text-mute); font-size: 11px; margin-top: 4px; }
+.url-preview b { color: var(--accent); font-family: var(--mono); font-weight: 500; }
+
+@media (prefers-reduced-motion: reduce) {
+    table.tbl tr.igniting { animation: none; }
+    table.tbl tr.launch-failed { animation: none; }
+}

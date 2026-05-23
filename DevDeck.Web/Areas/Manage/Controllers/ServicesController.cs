@@ -5,10 +5,12 @@ using DevDeck.Web.Data;
 using DevDeck.Web.Data.Entities;
 using DevDeck.Web.Services.Commands;
 using DevDeck.Web.Services.Health;
+using DevDeck.Web.Options;
 using DevDeck.Web.Services.Portability;
 using DevDeck.Web.Services.Runtime;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace DevDeck.Web.Areas.Manage.Controllers;
 
@@ -22,6 +24,7 @@ public sealed class ServicesController : Controller
     private readonly PortProbeService _portProbe;
     private readonly PortabilityExporter _exporter;
     private readonly PortabilityImporter _importer;
+    private readonly IOptions<DevDeckOptions> _options;
 
     public ServicesController(
         IDbContextFactory<DevDeckDbContext> dbFactory,
@@ -29,7 +32,8 @@ public sealed class ServicesController : Controller
         CommandPresetProvider presets,
         PortProbeService portProbe,
         PortabilityExporter exporter,
-        PortabilityImporter importer)
+        PortabilityImporter importer,
+        IOptions<DevDeckOptions> options)
     {
         _dbFactory = dbFactory;
         _manager = manager;
@@ -37,6 +41,7 @@ public sealed class ServicesController : Controller
         _portProbe = portProbe;
         _exporter = exporter;
         _importer = importer;
+        _options = options;
     }
 
     [HttpGet("")]
@@ -44,10 +49,25 @@ public sealed class ServicesController : Controller
     {
         await using var db = await _dbFactory.CreateDbContextAsync();
         var services = await db.DevServices
+            .Include(s => s.HealthChecks)
             .OrderBy(s => s.DisplayOrder).ThenBy(s => s.Name)
             .ToListAsync();
         ViewBag.Presets = _presets.All();
         ViewBag.RunningIds = _manager.GetRunningProcesses().Select(r => r.DevServiceId).ToHashSet();
+        ViewBag.PollMs = _options.Value.DashboardPollingMilliseconds;
+
+        // Best-effort, one-shot port-conflict sweep (this GET is not polled).
+        // Probe every configured port in parallel; flag the ones held by a
+        // non-DevDeck process so the row can surface a ⚠ marker.
+        var probes = await Task.WhenAll(
+            services.Where(s => s.Port is int)
+                    .Select(async s => (port: s.Port!.Value,
+                                        status: await _portProbe.ProbeAsync(s.Port!.Value, s.Id))));
+        ViewBag.ConflictPorts = probes
+            .Where(p => p.status == PortStatus.UsedByOtherProcess)
+            .Select(p => p.port)
+            .ToHashSet();
+
         return View(services);
     }
 
@@ -284,6 +304,10 @@ public sealed class ServicesController : Controller
     public async Task<IActionResult> Stop(int id, CancellationToken cancellationToken)
     {
         var result = await _manager.StopServiceAsync(id, cancellationToken);
+        if (WantsJson())
+        {
+            return Json(new { success = result.Success, serviceId = id, message = result.Message ?? result.Error });
+        }
         TempData[result.Success ? "Info" : "Error"] = result.Message ?? result.Error;
         return RedirectBackOrDashboard();
     }
@@ -293,6 +317,10 @@ public sealed class ServicesController : Controller
     public async Task<IActionResult> Restart(int id, CancellationToken cancellationToken)
     {
         var result = await _manager.RestartServiceAsync(id, cancellationToken);
+        if (WantsJson())
+        {
+            return Json(new { success = result.Success, serviceId = id, message = result.Message ?? result.Error });
+        }
         TempData[result.Success ? "Info" : "Error"] = result.Message ?? result.Error;
         return RedirectBackOrDashboard();
     }

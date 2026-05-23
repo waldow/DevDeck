@@ -5,6 +5,8 @@
     ViewData["Crumb"] = "Configured services";
     var presets = (ViewBag.Presets as IReadOnlyList<CommandPreset>) ?? new List<CommandPreset>();
     var running = (ViewBag.RunningIds as HashSet<int>) ?? new HashSet<int>();
+    var conflictPorts = (ViewBag.ConflictPorts as HashSet<int>) ?? new HashSet<int>();
+    var pollMs = ViewBag.PollMs as int? ?? 1500;
 }
 
 @section Actions {
@@ -38,43 +40,59 @@
 }
 else
 {
-    <div class="table-wrap">
+    <div class="table-wrap" id="svc-table" data-poll="@pollMs">
         <table class="tbl">
             <thead>
-                <tr><th>Name</th><th>Type</th><th>Working dir</th><th>Port</th><th>Status</th><th style="width:1%">Actions</th></tr>
+                <tr><th>Name</th><th>Type</th><th>Working dir</th><th>Port</th><th>Status</th><th class="cell-actions">Actions</th></tr>
             </thead>
             <tbody>
             @foreach (var s in Model)
             {
                 var isRunning = running.Contains(s.Id);
-                <tr>
+                var hasHealth = s.HealthChecks.Any(h => h.Enabled);
+                var healthText = isRunning ? "Unknown" : "NotRunning";
+                var portConflict = s.Port is int prt && conflictPorts.Contains(prt);
+                <tr class="svc-row" data-service-id="@s.Id" data-enabled="@s.Enabled.ToString().ToLowerInvariant()">
                     <td>
-                        <a asp-action="Details" asp-route-id="@s.Id"><strong>@s.Name</strong></a>
-                        @if (!s.Enabled) { <span class="pill pill-stopped" style="margin-left:6px">disabled</span> }
-                        @if (s.AutoStart) { <span class="pill pill-info" style="margin-left:6px">auto</span> }
+                        <div class="status-cell">
+                            <a asp-action="Details" asp-route-id="@s.Id"><strong>@s.Name</strong></a>
+                            @if (!s.Enabled) { <span class="pill pill-stopped">disabled</span> }
+                            @if (s.AutoStart) { <span class="pill pill-info">auto</span> }
+                        </div>
                     </td>
                     <td class="mono">@s.ServiceType</td>
                     <td class="mono dim" title="@s.WorkingDirectory">@System.IO.Path.GetFileName(s.WorkingDirectory.TrimEnd('/', '\\'))</td>
-                    <td class="mono">@(s.Port?.ToString() ?? "—")</td>
+                    <td class="mono">
+                        @(s.Port?.ToString() ?? "—")
+                        @if (portConflict)
+                        {
+                            <span class="port-conflict" title="Port @s.Port is in use by another process">in use</span>
+                        }
+                    </td>
                     <td>
-                        @if (isRunning) { <span class="pill pill-running">Running</span> }
-                        else { <span class="pill pill-stopped">Stopped</span> }
+                        <div class="status-cell">
+                            <span class="pill pill-@(isRunning ? "running" : "stopped")" data-field="runtime">@(isRunning ? "Running" : "Stopped")</span>
+                            @if (hasHealth)
+                            {
+                                <span class="pill pill-@(healthText.ToLower())" data-field="health">@healthText</span>
+                            }
+                        </div>
                     </td>
                     <td>
                         <div class="btn-row">
-                            @if (isRunning)
-                            {
+                            <div class="row-actions" data-when="running" @(isRunning ? null : "hidden")>
                                 <form class="inline" method="post" asp-action="Stop" asp-route-id="@s.Id">@Html.AntiForgeryToken()<button class="btn btn-warn" type="submit">Stop</button></form>
                                 <form class="inline" method="post" asp-action="Restart" asp-route-id="@s.Id">@Html.AntiForgeryToken()<button class="btn" type="submit">Restart</button></form>
-                            }
-                            else
-                            {
+                            </div>
+                            <div class="row-actions" data-when="stopped" @(isRunning ? "hidden" : null)>
                                 <form class="inline" method="post" asp-action="Start" asp-route-id="@s.Id">@Html.AntiForgeryToken()<button class="btn btn-ok" type="submit">Start</button></form>
-                            }
-                            <a class="btn" asp-action="Edit" asp-route-id="@s.Id">Edit</a>
-                            <a class="btn btn-ghost" asp-area="Manage" asp-controller="Logs" asp-action="ServiceLogs" asp-route-id="@s.Id">Logs</a>
-                            <a class="btn btn-ghost" asp-action="ExportOne" asp-route-id="@s.Id" title="Download this service as JSON">Export</a>
-                            <form class="inline" method="post" asp-action="Delete" asp-route-id="@s.Id" onsubmit="return confirm('Delete this service?');">@Html.AntiForgeryToken()<button class="btn btn-danger" type="submit">Delete</button></form>
+                            </div>
+                            <div class="row-actions">
+                                <a class="btn" asp-action="Edit" asp-route-id="@s.Id">Edit</a>
+                                <a class="btn btn-ghost" asp-area="Manage" asp-controller="Logs" asp-action="ServiceLogs" asp-route-id="@s.Id">Logs</a>
+                                <a class="btn btn-ghost" asp-action="ExportOne" asp-route-id="@s.Id" title="Download this service as JSON">Export</a>
+                                <form class="inline" method="post" asp-action="Delete" asp-route-id="@s.Id" onsubmit="return confirm('Delete this service?');">@Html.AntiForgeryToken()<button class="btn btn-danger" type="submit">Delete</button></form>
+                            </div>
                         </div>
                     </td>
                 </tr>
@@ -82,4 +100,8 @@ else
             </tbody>
         </table>
     </div>
+}
+
+@section Scripts {
+    <script src="~/js/services.js" asp-append-version="true"></script>
 }

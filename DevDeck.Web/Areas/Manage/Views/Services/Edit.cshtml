@@ -58,12 +58,15 @@
             <div class="form-row"><input asp-for="Port" type="number" /></div>
 
             <label for="Url">URL</label>
-            <div class="form-row"><input asp-for="Url" class="mono" placeholder="http://localhost:{port}" /></div>
+            <div class="form-row">
+                <input asp-for="Url" class="mono" placeholder="http://localhost:{port}" />
+                <span class="url-preview" id="urlPreview" hidden></span>
+            </div>
 
             <label></label>
-            <div class="form-row" style="flex-direction:row; gap:18px; align-items:center;">
-                <label style="padding-top:0"><input asp-for="Enabled" type="checkbox" /> Enabled</label>
-                <label style="padding-top:0"><input asp-for="AutoStart" type="checkbox" /> Auto-start with DevDeck</label>
+            <div class="form-row inline-checks">
+                <label><input asp-for="Enabled" type="checkbox" /> Enabled</label>
+                <label><input asp-for="AutoStart" type="checkbox" /> Auto-start with DevDeck</label>
             </div>
 
             <label for="DisplayOrder">Display order</label>
@@ -71,48 +74,57 @@
         </div>
     </div>
 
-    <div class="card section" style="margin-top:18px">
+    <div class="card section mt-md">
         <div class="card-head"><h2>Environment variables</h2></div>
         <div class="card-pad">
             <table class="tbl" id="envvars">
-                <thead><tr><th>Key</th><th>Value</th><th>Secret</th><th></th></tr></thead>
+                <thead><tr><th>Key</th><th>Value</th><th>Secret</th><th class="cell-actions"></th></tr></thead>
                 <tbody>
                     @for (var i = 0; i < Model.EnvironmentVariables.Count; i++)
                     {
                         var prefix = $"EnvironmentVariables[{i}]";
-                        <tr>
+                        <tr class="repeat-row">
                             <td><input name="@(prefix).Id" type="hidden" value="@Model.EnvironmentVariables[i].Id" /><input name="@(prefix).Key" value="@Model.EnvironmentVariables[i].Key" class="mono" /></td>
-                            <td><input name="@(prefix).Value" value="@Model.EnvironmentVariables[i].Value" class="mono" type="@(Model.EnvironmentVariables[i].IsSecret ? "password" : "text")" autocomplete="off" /></td>
+                            <td class="cell-value">
+                                <input name="@(prefix).Value" value="@Model.EnvironmentVariables[i].Value" class="mono js-value" type="@(Model.EnvironmentVariables[i].IsSecret ? "password" : "text")" autocomplete="off" />
+                                <button type="button" class="icon-btn reveal js-reveal" title="Show / hide value" aria-label="Show value" tabindex="-1">👁</button>
+                            </td>
                             <td><input name="@(prefix).IsSecret" type="checkbox" value="true" @(Model.EnvironmentVariables[i].IsSecret ? "checked" : "")><input name="@(prefix).IsSecret" type="hidden" value="false" /></td>
-                            <td><label class="dim"><input name="@(prefix).Delete" type="checkbox" value="true" /> remove</label><input name="@(prefix).Delete" type="hidden" value="false" /></td>
+                            <td class="cell-actions">
+                                <input name="@(prefix).Delete" type="hidden" value="false" class="js-delete-flag" />
+                                <button type="button" class="icon-btn danger js-remove" title="Remove variable" aria-label="Remove variable">✕</button>
+                            </td>
                         </tr>
                     }
                 </tbody>
             </table>
-            <button type="button" class="btn" id="addEnv" style="margin-top:10px">+ Add variable</button>
+            <button type="button" class="btn mt-md" id="addEnv">+ Add variable</button>
         </div>
     </div>
 
-    <div class="card section" style="margin-top:18px">
+    <div class="card section mt-md">
         <div class="card-head"><h2>Health checks</h2></div>
         <div class="card-pad">
             <table class="tbl" id="healthchecks">
-                <thead><tr><th>URL</th><th>Expected code</th><th>Interval (s)</th><th>Enabled</th><th></th></tr></thead>
+                <thead><tr><th>URL</th><th>Expected code</th><th>Interval (s)</th><th>Enabled</th><th class="cell-actions"></th></tr></thead>
                 <tbody>
                     @for (var i = 0; i < Model.HealthChecks.Count; i++)
                     {
                         var prefix = $"HealthChecks[{i}]";
-                        <tr>
+                        <tr class="repeat-row">
                             <td><input name="@(prefix).Id" type="hidden" value="@Model.HealthChecks[i].Id" /><input name="@(prefix).Url" value="@Model.HealthChecks[i].Url" class="mono" /></td>
                             <td><input name="@(prefix).ExpectedStatusCode" value="@Model.HealthChecks[i].ExpectedStatusCode" type="number" /></td>
                             <td><input name="@(prefix).IntervalSeconds" value="@Model.HealthChecks[i].IntervalSeconds" type="number" /></td>
                             <td><input name="@(prefix).Enabled" type="checkbox" value="true" @(Model.HealthChecks[i].Enabled ? "checked" : "")><input name="@(prefix).Enabled" type="hidden" value="false" /></td>
-                            <td><label class="dim"><input name="@(prefix).Delete" type="checkbox" value="true" /> remove</label><input name="@(prefix).Delete" type="hidden" value="false" /></td>
+                            <td class="cell-actions">
+                                <input name="@(prefix).Delete" type="hidden" value="false" class="js-delete-flag" />
+                                <button type="button" class="icon-btn danger js-remove" title="Remove health check" aria-label="Remove health check">✕</button>
+                            </td>
                         </tr>
                     }
                 </tbody>
             </table>
-            <button type="button" class="btn" id="addHc" style="margin-top:10px">+ Add health check</button>
+            <button type="button" class="btn mt-md" id="addHc">+ Add health check</button>
         </div>
     </div>
 
@@ -123,30 +135,5 @@
 </form>
 
 @section Scripts {
-    <script>
-    (function () {
-        function addRow(tableId, columns) {
-            const tbody = document.querySelector('#' + tableId + ' tbody');
-            const idx = tbody.children.length;
-            const tr = document.createElement('tr');
-            tr.innerHTML = columns(idx);
-            tbody.appendChild(tr);
-        }
-        document.getElementById('addEnv')?.addEventListener('click', () => {
-            addRow('envvars', i => `
-                <td><input name="EnvironmentVariables[${i}].Id" type="hidden" value="0" /><input name="EnvironmentVariables[${i}].Key" class="mono" /></td>
-                <td><input name="EnvironmentVariables[${i}].Value" class="mono" /></td>
-                <td><input name="EnvironmentVariables[${i}].IsSecret" type="checkbox" value="true" /><input name="EnvironmentVariables[${i}].IsSecret" type="hidden" value="false" /></td>
-                <td><label class="dim"><input name="EnvironmentVariables[${i}].Delete" type="checkbox" value="true" /> remove</label><input name="EnvironmentVariables[${i}].Delete" type="hidden" value="false" /></td>`);
-        });
-        document.getElementById('addHc')?.addEventListener('click', () => {
-            addRow('healthchecks', i => `
-                <td><input name="HealthChecks[${i}].Id" type="hidden" value="0" /><input name="HealthChecks[${i}].Url" class="mono" /></td>
-                <td><input name="HealthChecks[${i}].ExpectedStatusCode" type="number" value="200" /></td>
-                <td><input name="HealthChecks[${i}].IntervalSeconds" type="number" value="10" /></td>
-                <td><input name="HealthChecks[${i}].Enabled" type="checkbox" value="true" checked /><input name="HealthChecks[${i}].Enabled" type="hidden" value="false" /></td>
-                <td><label class="dim"><input name="HealthChecks[${i}].Delete" type="checkbox" value="true" /> remove</label><input name="HealthChecks[${i}].Delete" type="hidden" value="false" /></td>`);
-        });
-    })();
-    </script>
+    <script src="~/js/service-edit.js" asp-append-version="true"></script>
 }

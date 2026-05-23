@@ -5,7 +5,7 @@
     ViewData["Crumb"] = "Service detail";
     var runningInfo = ViewBag.RunningInfo as RunningProcessInfo;
     var recent = (ViewBag.RecentRuns as List<ServiceRun>) ?? new();
-    var liveLogs = (ViewBag.LiveLogs as List<LogLine>) ?? new();
+    var isRunning = runningInfo is not null;
 }
 
 @section Actions {
@@ -13,7 +13,7 @@
     <a class="btn btn-ghost" asp-area="Manage" asp-controller="Logs" asp-action="ServiceLogs" asp-route-id="@Model.Id">Logs</a>
 }
 
-<div class="grid-cards" style="grid-template-columns: 1fr 1fr;">
+<div class="grid-cards cols-2">
     <div class="card card-pad">
         <div class="section-title">Configuration</div>
         <dl class="kv">
@@ -29,23 +29,20 @@
 
     <div class="card card-pad">
         <div class="section-title">Runtime</div>
-        @if (runningInfo is null)
-        {
-            <div class="empty" style="padding:18px">Not running.</div>
-        }
-        else
-        {
-            <dl class="kv">
-                <dt>Status</dt><dd><span class="pill pill-running">@runningInfo.Status</span></dd>
-                <dt>Started</dt><dd>@runningInfo.StartedUtc.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss")</dd>
+        <dl class="kv">
+            <dt>Status</dt>
+            <dd><span id="runState" class="pill pill-@(isRunning ? "running" : "stopped")">@(isRunning ? runningInfo!.Status.ToString() : "Stopped")</span></dd>
+            @if (isRunning)
+            {
+                <dt>Started</dt><dd>@runningInfo!.StartedUtc.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss")</dd>
                 <dt>PID</dt><dd class="mono">@(SafePid(runningInfo))</dd>
                 <dt>Log file</dt><dd class="mono dim">@runningInfo.LogFilePath</dd>
-            </dl>
-        }
+            }
+        </dl>
     </div>
 </div>
 
-<div class="section" style="margin-top:18px">
+<div class="section mt-md">
     <div class="section-title">Recent runs</div>
     @if (recent.Count == 0)
     {
@@ -75,15 +72,17 @@
 </div>
 
 <div class="section">
-    <div class="section-title">Live log (last 50 lines)</div>
-    <div class="log-panel">
-@foreach (var l in liveLogs)
-{
-    <div class="log-line @l.Stream">@l.Format()</div>
-}
-@if (liveLogs.Count == 0) { <div class="dim">No live log yet.</div> }
+    <div class="log-toolbar">
+        <div class="section-title">Live log</div>
+        <span class="dim" id="lineCount">0 lines</span>
+        <label class="dim ml-auto"><input type="checkbox" id="autoscroll" checked /> Autoscroll</label>
     </div>
+    <div class="log-panel" id="logpanel" data-service-id="@Model.Id"></div>
 </div>
+
+@section Scripts {
+    <script src="~/js/logs.js" asp-append-version="true"></script>
+}
 
 @functions {
     static int? SafePid(RunningProcessInfo info) { try { return info.Process.Id; } catch { return null; } }
