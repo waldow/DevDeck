@@ -36,9 +36,9 @@ public sealed class LogsController : Controller
     {
         var info = _manager.GetRunningProcess(id);
         var lines = _manager.GetLiveLogs(id);
-        var newSlice = sinceCount > 0 && lines.Count > sinceCount
-            ? lines.Skip(sinceCount).Select(l => l.Format()).ToArray()
-            : lines.Select(l => l.Format()).ToArray();
+        var newSlice = sinceCount <= 0
+            ? lines.Select(l => l.Format()).ToArray()
+            : lines.Skip(Math.Min(sinceCount, lines.Count)).Select(l => l.Format()).ToArray();
         return Json(new
         {
             serviceId = id,

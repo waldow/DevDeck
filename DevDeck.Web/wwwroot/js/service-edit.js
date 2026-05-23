@@ -22,7 +22,7 @@
             <td><input name="EnvironmentVariables[${i}].Id" type="hidden" value="0" /><input name="EnvironmentVariables[${i}].Key" class="mono" /></td>
             <td class="cell-value">
                 <input name="EnvironmentVariables[${i}].Value" class="mono js-value" type="text" autocomplete="off" />
-                <button type="button" class="icon-btn reveal js-reveal" title="Show / hide value" aria-label="Show value" tabindex="-1">&#128065;</button>
+                <button type="button" class="icon-btn reveal js-reveal" title="Show / hide value" aria-label="Show value">&#128065;</button>
             </td>
             <td><input name="EnvironmentVariables[${i}].IsSecret" type="checkbox" value="true" /><input name="EnvironmentVariables[${i}].IsSecret" type="hidden" value="false" /></td>
             <td class="cell-actions">

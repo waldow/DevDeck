@@ -87,7 +87,7 @@
                             <td><input name="@(prefix).Id" type="hidden" value="@Model.EnvironmentVariables[i].Id" /><input name="@(prefix).Key" value="@Model.EnvironmentVariables[i].Key" class="mono" /></td>
                             <td class="cell-value">
                                 <input name="@(prefix).Value" value="@Model.EnvironmentVariables[i].Value" class="mono js-value" type="@(Model.EnvironmentVariables[i].IsSecret ? "password" : "text")" autocomplete="off" />
-                                <button type="button" class="icon-btn reveal js-reveal" title="Show / hide value" aria-label="Show value" tabindex="-1">👁</button>
+                                <button type="button" class="icon-btn reveal js-reveal" title="Show / hide value" aria-label="Show value">👁</button>
                             </td>
                             <td><input name="@(prefix).IsSecret" type="checkbox" value="true" @(Model.EnvironmentVariables[i].IsSecret ? "checked" : "")><input name="@(prefix).IsSecret" type="hidden" value="false" /></td>
                             <td class="cell-actions">
