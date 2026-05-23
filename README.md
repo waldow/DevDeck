@@ -1,10 +1,14 @@
 <div align="center">
 
-# 🚀 DevDeck
+<img src="DevDeck.Web/wwwroot/images/devdeck-logo.png" alt="DevDeck logo" width="168" />
 
-### Start your whole local stack from one place.
+# DevDeck
 
-DevDeck is a local-developer dashboard that supervises every process your project needs — Azure Functions, Vite frontends, .NET APIs, Node services, Docker Compose, anything — and exposes them all behind **one reverse-proxy origin**. Configure once, then start, stop, restart, stream logs, and check health from a single browser tab.
+### Your local stack, under one glowing control deck.
+
+DevDeck is a local-developer dashboard for running the whole messy orchestra: Azure Functions, Vite frontends,
+.NET APIs, Node services, Docker Compose, custom commands, and whatever else your project needs. Configure once,
+then start, stop, restart, stream logs, watch health, and route everything through **one reverse-proxy origin**.
 
 <br/>
 
@@ -17,6 +21,10 @@ DevDeck is a local-developer dashboard that supervises every process your projec
 
 <br/>
 
+**One browser tab. One gateway. Every service in reach.**
+
+<br/>
+
 [Quick start](#-quick-start) ·
 [Features](#-features) ·
 [Reverse proxy](#-reverse-proxy) ·
@@ -25,6 +33,25 @@ DevDeck is a local-developer dashboard that supervises every process your projec
 [Safety model](#-safety-model)
 
 </div>
+
+---
+
+<table>
+<tr>
+<td width="64%" valign="middle">
+
+## The local-dev command center
+
+DevDeck turns terminal sprawl into a dashboard built for everyday development. It keeps process supervision,
+logs, health checks, route configuration, and import/export close together, while the gateway at
+`http://localhost:5050` makes your app stack feel like one coherent origin.
+
+</td>
+<td width="36%" align="center" valign="middle">
+<img src="DevDeck.Web/wwwroot/images/devdeck-icon.png" alt="DevDeck app icon" width="220" />
+</td>
+</tr>
+</table>
 
 ---
 
@@ -197,8 +224,27 @@ DevDeck.Web/
 DevDeck.Tests/          xUnit unit tests
 ```
 
-Brand assets live under `DevDeck.Web/wwwroot`: the favicon variants are at the root, and the DevDeck logo/icon
-PNGs are in `DevDeck.Web/wwwroot/images`.
+**Brand assets**
+
+<table>
+<tr>
+<td align="center" width="33%">
+<img src="DevDeck.Web/wwwroot/images/devdeck-icon.png" alt="DevDeck app icon" width="96" />
+<br/>
+<code>wwwroot/images/devdeck-icon.png</code>
+</td>
+<td align="center" width="33%">
+<img src="DevDeck.Web/wwwroot/favicon-32x32.png" alt="DevDeck favicon" width="32" />
+<br/>
+<code>wwwroot/favicon.ico</code>
+</td>
+<td align="center" width="33%">
+<img src="DevDeck.Web/wwwroot/images/devdeck-logo.png" alt="DevDeck logo" width="96" />
+<br/>
+<code>wwwroot/images/devdeck-logo.png</code>
+</td>
+</tr>
+</table>
 
 **Storage layout** — the separation is deliberate and load-bearing:
 
