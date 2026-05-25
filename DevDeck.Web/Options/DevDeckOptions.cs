@@ -33,4 +33,5 @@ public sealed class DevDeckReverseProxyOptions
     public bool AllowExternalDestinations { get; set; } = false;
     public bool AllowCatchAllRoutes { get; set; } = false;
     public bool EnableAutoStartOnRequest { get; set; } = false;
+    public bool LogProxyRequests { get; set; } = true;
 }

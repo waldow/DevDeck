@@ -453,6 +453,17 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
         _logFileWriter.Append(logPath, line);
     }
 
+    public void AppendProxyLog(int serviceId, string text)
+    {
+        var info = GetRunningProcess(serviceId);
+        if (info is null)
+        {
+            return; // service not running -> nothing to attach the proxy line to
+        }
+
+        WriteLine(serviceId, info.ServiceRunId, info.LogFilePath, "PRX", text);
+    }
+
     private void AppendSystemLine(int serviceId, long runId, string logPath, string text) =>
         WriteLine(serviceId, runId, logPath, "SYS", text);
 

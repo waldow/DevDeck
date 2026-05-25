@@ -37,6 +37,7 @@
     function classFor(line) {
         if (line.includes('[ERR]')) return 'ERR';
         if (line.includes('[SYS]')) return 'SYS';
+        if (line.includes('[PRX]')) return 'PRX';
         return 'OUT';
     }
 
@@ -105,7 +106,7 @@
         const div = document.createElement('div');
         div.className = 'log-line ' + classFor(line);
 
-        const match = line.match(/^(\d{4}-\d{2}-\d{2}T\S+)\s+\[(OUT|ERR|SYS)\]\s?(.*)$/);
+        const match = line.match(/^(\d{4}-\d{2}-\d{2}T\S+)\s+\[(OUT|ERR|SYS|PRX)\]\s?(.*)$/);
         if (!match) {
             appendHighlightedText(div, line);
             return div;

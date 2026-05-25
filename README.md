@@ -277,7 +277,8 @@ Settings live in `DevDeck.Web/appsettings.json` under the `DevDeck` section:
       "GatewayBaseUrl": "http://localhost:5050",
       "AllowExternalDestinations": false,
       "AllowCatchAllRoutes": false,
-      "EnableAutoStartOnRequest": false
+      "EnableAutoStartOnRequest": false,
+      "LogProxyRequests": true
     }
   }
 }
@@ -295,6 +296,7 @@ Settings live in `DevDeck.Web/appsettings.json` under the `DevDeck` section:
 | `ReverseProxy.AllowExternalDestinations` | `false` | Permit proxy destinations outside localhost/private networks. |
 | `ReverseProxy.AllowCatchAllRoutes` | `false` | Permit bare `/` and `/{**catch-all}` SPA-fallback routes. |
 | `ReverseProxy.EnableAutoStartOnRequest` | `false` | (Reserved for future) start a service when its route is first hit. |
+| `ReverseProxy.LogProxyRequests` | `true` | Log each proxied request as a `PRX` inbound/outbound line pair in the target service's log stream. |
 
 `AllowExternalDestinations` is off by default — routes are restricted to `localhost`, `127.0.0.1`, `::1`, `*.localhost`, and RFC 1918 private networks (`10/8`, `172.16/12`, `192.168/16`). Flip it on only if you genuinely need to proxy something external.
 

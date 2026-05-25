@@ -283,6 +283,10 @@ public sealed class RunHistoryRefreshServiceTests : IDisposable
         public void ClearLiveLogs(int serviceId)
         {
         }
+
+        public void AppendProxyLog(int serviceId, string text)
+        {
+        }
     }
 
     private sealed class TestDbContextFactory : IDbContextFactory<DevDeckDbContext>

@@ -190,11 +190,13 @@ legend { color: var(--text-dim); padding: 0 8px; font-size: 12px; letter-spacing
 .log-line.OUT { color: #d7dde7; }
 .log-line.ERR { color: #ffcdc7; }
 .log-line.SYS { color: #9ee7f5; }
+.log-line.PRX { color: #d3c4f5; }
 .log-ts, .log-inner-ts { color: #73d66f; }
 .log-stream { font-weight: 600; }
 .log-stream-out { color: #d9e0ea; }
 .log-stream-err, .log-error-token { color: #ff756c; }
 .log-stream-sys, .log-info-token { color: var(--accent); }
+.log-stream-prx { color: #b18cf0; }
 .log-warn-token { color: #f5c84b; }
 .log-method { color: #d8b4fe; font-weight: 600; }
 .log-url { color: #55b8ff; text-decoration: underline; text-underline-offset: 2px; }

@@ -37,6 +37,7 @@ builder.Services.AddSingleton<PortProbeService>();
 builder.Services.AddSingleton<ProxyDestinationValidator>();
 builder.Services.AddSingleton<ProxyRouteBuilder>();
 builder.Services.AddSingleton<ProxyRequestGuard>();
+builder.Services.AddSingleton<ProxyRequestLogger>();
 builder.Services.AddSingleton<DevDeckProxyConfigProvider>();
 builder.Services.AddSingleton<IProxyConfigProvider>(sp => sp.GetRequiredService<DevDeckProxyConfigProvider>());
 builder.Services.AddSingleton<PortabilityExporter>();
@@ -97,6 +98,11 @@ if (devDeckOptions.ReverseProxy.Enabled)
             {
                 await next();
             }
+        });
+        proxyPipeline.Use(async (context, next) =>
+        {
+            var logger = context.RequestServices.GetRequiredService<ProxyRequestLogger>();
+            await logger.LogExchangeAsync(context, next);
         });
     });
 }

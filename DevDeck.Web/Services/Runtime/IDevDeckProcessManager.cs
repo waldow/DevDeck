@@ -14,4 +14,5 @@ public interface IDevDeckProcessManager
     IReadOnlyCollection<RunningProcessInfo> GetRunningProcesses();
     IReadOnlyList<LogLine> GetLiveLogs(int serviceId);
     void ClearLiveLogs(int serviceId);
+    void AppendProxyLog(int serviceId, string text);
 }
