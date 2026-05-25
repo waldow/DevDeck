@@ -65,14 +65,26 @@ public sealed class ProxyRequestLoggerTests : IDisposable
     }
 
     [Fact]
-    public void AppendProxyLog_is_a_no_op_when_the_service_is_not_running()
+    public void AppendProxyLog_uses_supplied_run_snapshot()
     {
         var manager = CreateManager();
+        using var process = new System.Diagnostics.Process();
+        var info = new RunningProcessInfo
+        {
+            DevServiceId = 999,
+            ServiceRunId = 123,
+            ServiceName = "API",
+            Process = process,
+            StartedUtc = DateTimeOffset.UtcNow,
+            LogFilePath = Path.Combine(AppContext.BaseDirectory, $"proxy-log-{Guid.NewGuid():N}.log"),
+        };
 
-        // Service 999 is not running, so there is no run/log file to attach the line to.
-        manager.AppendProxyLog(999, "127.0.0.1 --> GET /");
+        manager.AppendProxyLog(info, "127.0.0.1 --> GET /");
 
-        manager.GetLiveLogs(999).Should().BeEmpty();
+        var line = manager.GetLiveLogs(999).Should().ContainSingle().Subject;
+        line.Stream.Should().Be("PRX");
+        line.ServiceRunId.Should().Be(123);
+        line.Text.Should().Be("127.0.0.1 --> GET /");
     }
 
     private DevDeckProcessManager CreateManager()

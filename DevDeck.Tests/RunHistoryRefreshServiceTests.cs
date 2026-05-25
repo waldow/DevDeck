@@ -284,7 +284,7 @@ public sealed class RunHistoryRefreshServiceTests : IDisposable
         {
         }
 
-        public void AppendProxyLog(int serviceId, string text)
+        public void AppendProxyLog(RunningProcessInfo info, string text)
         {
         }
     }

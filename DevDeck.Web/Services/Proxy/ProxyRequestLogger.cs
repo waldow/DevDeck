@@ -39,12 +39,19 @@ public sealed class ProxyRequestLogger
             return;
         }
 
+        var logTarget = _processManager.GetRunningProcess(serviceId);
+        if (logTarget is null)
+        {
+            await next();
+            return;
+        }
+
         var ip = context.Connection.RemoteIpAddress?.ToString() ?? "-";
         var verb = context.Request.Method;
         var path = context.Request.Path.ToString();
         var pathAndQuery = path + context.Request.QueryString;
 
-        _processManager.AppendProxyLog(serviceId, FormatInbound(ip, verb, pathAndQuery));
+        _processManager.AppendProxyLog(logTarget, FormatInbound(ip, verb, pathAndQuery));
 
         var sw = Stopwatch.StartNew();
         try
@@ -57,7 +64,7 @@ public sealed class ProxyRequestLogger
             var dest = context.Features.Get<IReverseProxyFeature>()?.ProxiedDestination?.Model.Config.Address ?? "-";
             var status = context.Response.StatusCode;
             var size = context.Response.ContentLength;
-            _processManager.AppendProxyLog(serviceId,
+            _processManager.AppendProxyLog(logTarget,
                 FormatOutbound(ip, verb, path, dest, status, sw.ElapsedMilliseconds, size));
         }
     }
