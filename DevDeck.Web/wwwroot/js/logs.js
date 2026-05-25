@@ -7,21 +7,32 @@
     const countEl = document.getElementById('lineCount');
     let seen = 0;
 
+    // One source of truth: each rule carries the boundaried pattern used to detect *and*
+    // classify a token. A sticky clone of each (built below) drives a single left-to-right
+    // scan in appendHighlightedText, so detection and styling can never drift apart, and
+    // each rule keeps its own case-sensitivity (e.g. HTTP verbs stay uppercase-only, so
+    // prose words like "delete"/"head" are left as plain text).
     const tokenRules = [
-        { className: 'log-url', pattern: /^https?:\/\/[^\s\]]+/i, link: true },
-        { className: 'log-level log-error-token', pattern: /^(?:error|errors|failed|failure|exception|critical|fatal)\b/i },
-        { className: 'log-level log-warn-token', pattern: /^(?:warning|warnings|warn)\b/i },
-        { className: 'log-level log-info-token', pattern: /^(?:info|debug|trace)\b/i },
-        { className: 'log-method', pattern: /^(?:GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\b/ },
-        { className: 'log-code', pattern: /^[A-Z]{2,}[0-9]{3,}\b/ },
-        { className: 'log-version', pattern: /^\d+(?:\.\d+){1,}(?:[-+][0-9A-Za-z.-]+)?\b/ },
-        { className: 'log-duration', pattern: /^\d{2}:\d{2}:\d{2}(?:\.\d+)?\b/ },
-        { className: 'log-count', pattern: /^\d+\s+(?:Warning|Error)\(s\)\b/i },
-        { className: 'log-quoted', pattern: /^'[^']*'|^"[^"]*"/ },
-        { className: 'log-path', pattern: /^[A-Za-z]:\\[^\s:]+(?:\([0-9,]+\))?/ },
-        { className: 'log-inner-ts', pattern: /^\[\d{4}-\d{2}-\d{2}T[^\]]+\]/ }
+        { className: 'log-url', match: /https?:\/\/[^\s\]]+/i, link: true },
+        { className: 'log-level log-error-token', match: /\b(?:error|errors|failed|failure|exception|critical|fatal)\b/i },
+        { className: 'log-level log-warn-token', match: /\b(?:warning|warnings|warn)\b/i },
+        { className: 'log-level log-info-token', match: /\b(?:info|debug|trace)\b/i },
+        { className: 'log-method', match: /\b(?:GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\b/ },
+        { className: 'log-code', match: /\b[A-Z]{2,}[0-9]{3,}\b/ },
+        // Consume IPv4[:port] as one plain token (no class) so addresses like 127.0.0.1
+        // aren't tinted as versions — it must precede log-version so the scan skips past
+        // the whole address rather than re-matching a suffix (e.g. "0.0.1") as a version.
+        { match: /\b\d{1,3}(?:\.\d{1,3}){3}\b(?::\d+)?/ },
+        { className: 'log-version', match: /\b\d+(?:\.\d+){1,}(?:[-+][0-9A-Za-z.-]+)?\b/ },
+        { className: 'log-duration', match: /\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b/ },
+        { className: 'log-count', match: /\b\d+\s+(?:Warning|Error)\(s\)/i },
+        { className: 'log-quoted', match: /'[^']*'|"[^"]*"/ },
+        { className: 'log-path', match: /[A-Za-z]:\\[^\s:]+(?:\([0-9,]+\))?/ },
+        { className: 'log-inner-ts', match: /\[\d{4}-\d{2}-\d{2}T[^\]]+\]/ }
     ];
-    const tokenPattern = /https?:\/\/[^\s\]]+|\b(?:error|errors|failed|failure|exception|critical|fatal)\b|\b(?:warning|warnings|warn)\b|\b(?:info|debug|trace)\b|\b(?:GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\b|\b[A-Z]{2,}[0-9]{3,}\b|\b\d+(?:\.\d+){1,}(?:[-+][0-9A-Za-z.-]+)?\b|\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b|\b\d+\s+(?:Warning|Error)\(s\)\b|'[^']*'|"[^"]*"|[A-Za-z]:\\[^\s:]+(?:\([0-9,]+\))?|\[\d{4}-\d{2}-\d{2}T[^\]]+\]/gi;
+    for (const rule of tokenRules) {
+        rule.sticky = new RegExp(rule.match.source, rule.match.flags + 'y');
+    }
 
     function classFor(line) {
         if (line.includes('[ERR]')) return 'ERR';
@@ -57,23 +68,36 @@
     }
 
     function appendHighlightedText(parent, text) {
-        let index = 0;
-        tokenPattern.lastIndex = 0;
-        let match;
+        let pos = 0;
+        let plainStart = 0;
 
-        while ((match = tokenPattern.exec(text)) !== null) {
-            if (match.index > index) {
-                appendText(parent, text.slice(index, match.index));
+        while (pos < text.length) {
+            let hitRule = null;
+            let hitLen = 0;
+            for (const rule of tokenRules) {
+                rule.sticky.lastIndex = pos;
+                const m = rule.sticky.exec(text);
+                if (m && m[0].length > 0) {
+                    hitRule = rule;
+                    hitLen = m[0].length;
+                    break;
+                }
             }
 
-            const token = match[0];
-            const rule = tokenRules.find(r => r.pattern.test(token));
-            appendToken(parent, token, rule);
-            index = match.index + token.length;
+            if (hitRule) {
+                if (pos > plainStart) {
+                    appendText(parent, text.slice(plainStart, pos));
+                }
+                appendToken(parent, text.slice(pos, pos + hitLen), hitRule);
+                pos += hitLen;
+                plainStart = pos;
+            } else {
+                pos++;
+            }
         }
 
-        if (index < text.length) {
-            appendText(parent, text.slice(index));
+        if (plainStart < text.length) {
+            appendText(parent, text.slice(plainStart));
         }
     }
 
