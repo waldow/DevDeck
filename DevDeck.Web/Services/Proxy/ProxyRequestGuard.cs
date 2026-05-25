@@ -35,30 +35,40 @@ public sealed class ProxyRequestGuard
         var isRunning = _processManager.GetRunningProcess(serviceId) is not null;
         if (!isRunning)
         {
-            var routeAllowsAutoStart = TryGetBool(metadata, "DevDeck.AutoStartService");
-            var globalAutoStartEnabled = _options.CurrentValue.ReverseProxy.EnableAutoStartOnRequest;
-            if (!routeAllowsAutoStart || !globalAutoStartEnabled)
-            {
-                await WriteUnavailableAsync(context, serviceId, "The proxied service is not running.");
-                return false;
-            }
+            // An externally-launched instance (e.g. a backend started manually or under a debugger
+            // in Visual Studio) may already be listening on the destination port. If so, forward to
+            // it rather than returning 503 — and fall through to the health gate below for consistency.
+            var externalInstanceUp =
+                TryGetInt(metadata, "DevDeck.DestinationPort", out var destPort)
+                && await _portProbe.IsPortOpenAsync(destPort, context.RequestAborted);
 
-            // The per-service semaphore inside StartServiceAsync serializes parallel cold-starts:
-            // the second caller waits for the first to finish, then sees the service running and
-            // returns "Service is already running." We treat that as success and continue.
-            var start = await _processManager.StartServiceAsync(serviceId, context.RequestAborted);
-            var nowRunning = _processManager.GetRunningProcess(serviceId) is not null;
-            if (!start.Success && !nowRunning)
+            if (!externalInstanceUp)
             {
-                await WriteUnavailableAsync(context, serviceId, start.Error ?? "The proxied service failed to start.");
-                return false;
-            }
+                var routeAllowsAutoStart = TryGetBool(metadata, "DevDeck.AutoStartService");
+                var globalAutoStartEnabled = _options.CurrentValue.ReverseProxy.EnableAutoStartOnRequest;
+                if (!routeAllowsAutoStart || !globalAutoStartEnabled)
+                {
+                    await WriteUnavailableAsync(context, serviceId, "The proxied service is not running.");
+                    return false;
+                }
 
-            var ready = await WaitForReadyAsync(serviceId, context.RequestAborted);
-            if (!ready)
-            {
-                await WriteUnavailableAsync(context, serviceId, "The proxied service did not become ready before the timeout.");
-                return false;
+                // The per-service semaphore inside StartServiceAsync serializes parallel cold-starts:
+                // the second caller waits for the first to finish, then sees the service running and
+                // returns "Service is already running." We treat that as success and continue.
+                var start = await _processManager.StartServiceAsync(serviceId, context.RequestAborted);
+                var nowRunning = _processManager.GetRunningProcess(serviceId) is not null;
+                if (!start.Success && !nowRunning)
+                {
+                    await WriteUnavailableAsync(context, serviceId, start.Error ?? "The proxied service failed to start.");
+                    return false;
+                }
+
+                var ready = await WaitForReadyAsync(serviceId, context.RequestAborted);
+                if (!ready)
+                {
+                    await WriteUnavailableAsync(context, serviceId, "The proxied service did not become ready before the timeout.");
+                    return false;
+                }
             }
         }
 

@@ -202,6 +202,39 @@ public sealed class ProxyRouteBuilderTests
         metadata!["DevDeck.ServiceId"].Should().Be("7");
         metadata["DevDeck.AutoStartService"].Should().Be("True");
         metadata["DevDeck.RequireHealthyDestination"].Should().Be("True");
+        metadata["DevDeck.DestinationPort"].Should().Be("5173");
+    }
+
+    [Fact]
+    public void Build_adds_destination_port_metadata_from_rendered_service_url_template()
+    {
+        var routes = new[]
+        {
+            new ProxyRoute
+            {
+                Id = 12,
+                Name = "Templated",
+                Enabled = true,
+                DevServiceId = 7,
+                DevService = new DevService
+                {
+                    Id = 7,
+                    Name = "Main site",
+                    ServiceType = "Vite",
+                    WorkingDirectory = "C:\\work\\main",
+                    StartCommand = "npm",
+                    Url = "http://localhost:{port}",
+                    Port = 5173,
+                },
+                MatchPath = "/app/{**catch-all}",
+                PathTransformMode = "None",
+            },
+        };
+
+        var result = _builder.Build(routes);
+
+        result.Routes.Should().ContainSingle();
+        result.Routes[0].Metadata!["DevDeck.DestinationPort"].Should().Be("5173");
     }
 
     private static ProxyRoute NewRoute(string mode, string? removePrefix = null, string? addPrefix = null, string? pathSet = null) => new()

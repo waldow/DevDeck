@@ -50,6 +50,9 @@ public sealed class ProxyRouteBuilder
             }
 
             var destinationUrl = NormalizeDestination(destination.Url);
+            var destinationPort = Uri.TryCreate(destinationUrl, UriKind.Absolute, out var destinationUri)
+                ? destinationUri.Port
+                : (int?)null;
 
             var validation = _validator.Validate(destinationUrl);
             if (!validation.IsValid)
@@ -73,7 +76,7 @@ public sealed class ProxyRouteBuilder
                 },
                 Transforms = BuildTransforms(route),
                 AuthorizationPolicy = string.IsNullOrWhiteSpace(route.AuthorizationPolicy) ? null : route.AuthorizationPolicy,
-                Metadata = BuildMetadata(route),
+                Metadata = BuildMetadata(route, destinationPort),
             };
 
             var clusterConfig = new ClusterConfig
@@ -177,7 +180,7 @@ public sealed class ProxyRouteBuilder
         return new DestinationResolution(rendered.Text, rendered.UnknownPlaceholders);
     }
 
-    private static IReadOnlyDictionary<string, string> BuildMetadata(ProxyRoute route)
+    private static IReadOnlyDictionary<string, string> BuildMetadata(ProxyRoute route, int? destinationPort)
     {
         var metadata = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -189,6 +192,11 @@ public sealed class ProxyRouteBuilder
         if (route.DevServiceId is int serviceId)
         {
             metadata["DevDeck.ServiceId"] = serviceId.ToString();
+        }
+
+        if (destinationPort is int port)
+        {
+            metadata["DevDeck.DestinationPort"] = port.ToString();
         }
 
         return metadata;
