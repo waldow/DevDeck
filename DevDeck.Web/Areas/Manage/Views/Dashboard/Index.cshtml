@@ -10,9 +10,9 @@
         @Html.AntiForgeryToken()
         <button type="submit" class="btn btn-primary" id="start-all-btn"><span class="sa-label">▶&nbsp;Start all</span></button>
     </form>
-    <form class="inline" method="post" asp-area="Manage" asp-controller="Services" asp-action="StopAll">
+    <form class="inline" id="stop-all-form" method="post" asp-area="Manage" asp-controller="Services" asp-action="StopAll">
         @Html.AntiForgeryToken()
-        <button type="submit" class="btn btn-warn" onclick="return confirm('Stop all running services?');">Stop all</button>
+        <button type="submit" class="btn btn-warn" id="stop-all-btn"><span class="sa-label">■&nbsp;Stop all</span></button>
     </form>
     <a class="btn btn-primary" asp-area="Manage" asp-controller="Services" asp-action="Create">+ New service</a>
 }
@@ -80,4 +80,5 @@ else
 @section Scripts {
     <script src="~/js/dashboard.js" asp-append-version="true"></script>
     <script src="~/js/start-all.js" asp-append-version="true"></script>
+    <script src="~/js/stop-all.js" asp-append-version="true"></script>
 }

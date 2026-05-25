@@ -361,6 +361,40 @@ dialog.import-dlg p { margin: 0; font-size: 12.5px; }
 @keyframes flash-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes flash-out { to { opacity: 0; transform: translateY(-8px); } }
 
+/* ── Stop all — power-down sequence ────────────────────────── */
+
+/* Live HUD inside the Stop all button while halting. */
+#stop-all-btn.stopping { background: var(--bg-elev-3); color: var(--warn); border: 1px solid rgba(251,191,36,0.45); cursor: progress; }
+#stop-all-btn .sa-bar { font-family: var(--mono); letter-spacing: 1px; color: var(--warn); text-shadow: 0 0 8px rgba(251,191,36,0.6); }
+
+/* A card mid power-down: amber border, a glow that fades, and the card dims down. */
+.service-card.quashing { border-color: rgba(251,191,36,0.5); animation: quash-glow 1s ease-in-out infinite; position: relative; overflow: hidden; }
+.service-card.quashing::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
+    background: linear-gradient(115deg, transparent 30%, rgba(251,191,36,0.18) 50%, transparent 70%);
+    background-size: 220% 100%; animation: quash-sweep 1s ease-in-out infinite;
+}
+@keyframes quash-glow {
+    0%, 100% { box-shadow: var(--shadow), 0 0 0 1px rgba(251,191,36,0.10); opacity: 1; }
+    50% { box-shadow: var(--shadow), 0 0 18px -4px rgba(251,191,36,0.55), 0 0 0 1px rgba(251,191,36,0.3); opacity: 0.72; }
+}
+/* Sweep runs left-to-right — the wind-down mirror of ignite-sweep. */
+@keyframes quash-sweep {
+    from { background-position: -40% 0; }
+    to { background-position: 140% 0; }
+}
+
+/* The "offline" settle when a runtime pill drops to a stopped state (added by dashboard.js). */
+.pill.offline-pop { animation: offline-pop 560ms cubic-bezier(0.22, 1, 0.36, 1); }
+@keyframes offline-pop {
+    0% { transform: scale(1.12); box-shadow: 0 0 14px 2px rgba(251,191,36,0.5); }
+    60% { transform: scale(0.93); }
+    100% { transform: scale(1); box-shadow: none; }
+}
+
+/* A service that refused to stop: brief red shudder (shares launch-shake). */
+.service-card.stop-failed { border-color: rgba(248,113,113,0.55); animation: launch-shake 420ms ease-in-out; }
+
 @media (prefers-reduced-motion: reduce) {
     .sidebar .brand-logo { transition: none; }
     .sidebar .brand:hover .brand-logo { transform: none; }
@@ -368,6 +402,10 @@ dialog.import-dlg p { margin: 0; font-size: 12.5px; }
     .service-card.igniting::after { display: none; }
     .pill.online-pop { animation: none; }
     .service-card.launch-failed { animation: none; }
+    .service-card.quashing { animation: none; }
+    .service-card.quashing::after { display: none; }
+    .pill.offline-pop { animation: none; }
+    .service-card.stop-failed { animation: none; }
     .flash-transient, .flash-transient.flash-leaving { animation: none; }
 }
 

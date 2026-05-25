@@ -287,12 +287,16 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
             var exited = false;
             try
             {
+                // Once a stop is underway it must run to completion (including the kill
+                // fallback) even if the HTTP request that triggered it is aborted — otherwise
+                // an aborted Stop-all would leave a live process pinned at "Stopping" forever.
+                // So the process waits below use CancellationToken.None and rely on timeouts.
                 if (!info.Process.HasExited)
                 {
                     var signalled = TrySendGracefulShutdown(info.Process, serviceId, info.ServiceRunId, info.LogFilePath);
                     if (signalled)
                     {
-                        exited = await WaitForExitAsync(info.Process, timeout, cancellationToken);
+                        exited = await WaitForExitAsync(info.Process, timeout, CancellationToken.None);
                     }
                 }
                 else
@@ -305,7 +309,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
                     info.KillIssued = true;
                     AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, "Killing process tree");
                     info.Process.Kill(entireProcessTree: true);
-                    exited = await WaitForExitAsync(info.Process, TimeSpan.FromSeconds(2), cancellationToken);
+                    exited = await WaitForExitAsync(info.Process, TimeSpan.FromSeconds(5), CancellationToken.None);
                 }
             }
             catch (Exception ex)
@@ -501,7 +505,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
                     killed = true;
                     AppendOptionalSystemLine(serviceId, run.Id, run.LogFilePath, "Killing orphaned process tree");
                     process.Kill(entireProcessTree: true);
-                    exited = await WaitForExitAsync(process, TimeSpan.FromSeconds(2), cancellationToken);
+                    exited = await WaitForExitAsync(process, TimeSpan.FromSeconds(5), CancellationToken.None);
                 }
             }
             catch (Exception ex)
@@ -671,11 +675,14 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
                 // CloseMainWindow only reaches processes that have a main window; console
-                // children won't react but the kill fallback handles them.
+                // children (npm/dotnet/func) have none, so it returns false and does nothing.
+                // Report whether we actually signalled: a false return skips the pointless
+                // graceful wait and goes straight to the kill fallback instead of idling for
+                // the full StopTimeoutSeconds on every console-app stop.
                 var closed = process.CloseMainWindow();
                 AppendSystemLine(serviceId, runId, logPath,
-                    closed ? "Sent close to main window" : "No main window; awaiting kill fallback");
-                return true;
+                    closed ? "Sent close to main window" : "No main window; killing process tree");
+                return closed;
             }
 
             // Unix: send SIGTERM via libc kill — Process.Kill() is SIGKILL on .NET so we
