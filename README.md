@@ -80,6 +80,7 @@ DevDeck collapses that into one UI. Logs stream into a single panel. Health pill
 
 **🟢 Process supervision**
 - Start, stop, restart, and watch any local command (`npm run dev`, `func start`, `dotnet run`, `docker compose up`, custom binaries).
+- **Start all / Stop all** from the dashboard — a staggered ignite / power-down cascade animates cards as they come up and go down.
 - Per-service environment variables, with **secret masking** in the UI.
 - **Process-tree kill** on stop — `npm` and all its children go down together.
 - Run history per service: start/stop timestamps, exit codes, downloadable logs.
@@ -90,8 +91,9 @@ DevDeck collapses that into one UI. Logs stream into a single panel. Health pill
 
 **📜 Live + persistent logs**
 - 5,000-line in-memory ring buffer per service, auto-scrolling monospace panel.
+- **VS Code-style semantic coloring** — log levels, HTTP verbs, status codes, durations, versions, file paths, and clickable URLs are tinted as they stream.
 - Every line also written to `{slug}-{run}-{timestamp}.log` for archival.
-- `[OUT]` / `[ERR]` / `[SYS]` stream tagging.
+- `[OUT]` / `[ERR]` / `[SYS]` / `[PRX]` stream tagging.
 
 </td>
 <td width="50%" valign="top">
@@ -171,6 +173,13 @@ Three routes give you a single-origin stack:
 
 Your browser sees one origin — `http://localhost:5050` — so CORS gets out of the way. Edits hot-reload into the live YARP snapshot without restarting DevDeck.
 
+Each forwarded request is logged straight into the target service's log stream as a `[PRX]` pair — an inbound line and an outbound line carrying the response status, latency, and size:
+
+```text
+2026-05-25T09:14:02 [PRX] 127.0.0.1 --> GET /api/Catalog/items?page=2
+2026-05-25T09:14:02 [PRX] 127.0.0.1 <-- 200 GET /api/Catalog/items -> http://localhost:7071/ 18ms 4.2 KB
+```
+
 > ⚠️ A bare catch-all (`/`, `/{**catch-all}`) for a SPA fallback is **disabled by default**. Enable `DevDeck:ReverseProxy:AllowCatchAllRoutes` to use one — otherwise the route is persisted but skipped (with a warning) when the proxy config is built.
 
 ---
@@ -190,13 +199,13 @@ A sample route bundle ships in this repo as [`devdeck-main-react-api-routes.json
   "schemaVersion": 1,
   "routes": [
     {
-      "name": "Receipts",
-      "serviceName": "FunctionAppReceipts",
+      "name": "Catalog",
+      "serviceName": "FunctionAppCatalog",
       "destinationUrlOverride": "http://localhost:7071/",
-      "matchPath": "/api/Receipt/{**catch-all}",
-      "order": 1,
+      "matchPath": "/api/Catalog/{**catch-all}",
+      "order": 0,
       "pathTransformMode": "RemoveAndAddPrefix",
-      "pathPrefixToRemove": "/api/Receipt",
+      "pathPrefixToRemove": "/api/Catalog",
       "pathPrefixToAdd": "/api"
     }
     // …more routes
@@ -223,28 +232,6 @@ DevDeck.Web/
   Migrations/           EF Core SQLite migrations
 DevDeck.Tests/          xUnit unit tests
 ```
-
-**Brand assets**
-
-<table>
-<tr>
-<td align="center" width="33%">
-<img src="DevDeck.Web/wwwroot/images/devdeck-icon.png" alt="DevDeck app icon" width="96" />
-<br/>
-<code>wwwroot/images/devdeck-icon.png</code>
-</td>
-<td align="center" width="33%">
-<img src="DevDeck.Web/wwwroot/favicon-32x32.png" alt="DevDeck favicon" width="32" />
-<br/>
-<code>wwwroot/favicon.ico</code>
-</td>
-<td align="center" width="33%">
-<img src="DevDeck.Web/wwwroot/images/devdeck-logo.png" alt="DevDeck logo" width="96" />
-<br/>
-<code>wwwroot/images/devdeck-logo.png</code>
-</td>
-</tr>
-</table>
 
 **Storage layout** — the separation is deliberate and load-bearing:
 
@@ -296,7 +283,7 @@ Settings live in `DevDeck.Web/appsettings.json` under the `DevDeck` section:
 | `ReverseProxy.AllowExternalDestinations` | `false` | Permit proxy destinations outside localhost/private networks. |
 | `ReverseProxy.AllowCatchAllRoutes` | `false` | Permit bare `/` and `/{**catch-all}` SPA-fallback routes. |
 | `ReverseProxy.EnableAutoStartOnRequest` | `false` | (Reserved for future) start a service when its route is first hit. |
-| `ReverseProxy.LogProxyRequests` | `true` | Log each proxied request as a `PRX` inbound/outbound line pair in the target service's log stream. |
+| `ReverseProxy.LogProxyRequests` | `true` | Log each proxied request as a `PRX` line pair — inbound request + outbound response (status, latency, size) — in the target service's log stream. |
 
 `AllowExternalDestinations` is off by default — routes are restricted to `localhost`, `127.0.0.1`, `::1`, `*.localhost`, and RFC 1918 private networks (`10/8`, `172.16/12`, `192.168/16`). Flip it on only if you genuinely need to proxy something external.
 
