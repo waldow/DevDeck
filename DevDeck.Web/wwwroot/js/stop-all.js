@@ -1,7 +1,7 @@
 // Stop all — progressive-enhancement power-down cascade.
 // Without JS the #stop-all-form posts to Services/StopAll and the page reloads.
-// With JS we intercept the submit and quash running services one-by-one, dimming
-// each card as it powers down. dashboard.js polling confirms Stopped (offline pop).
+// With JS we intercept the submit, ask the server to run the canonical StopAll
+// sweep (including orphaned runs), and animate visible running cards as they dim.
 (function () {
     const form = document.getElementById('stop-all-form');
     const btn = document.getElementById('stop-all-btn');
@@ -53,55 +53,103 @@
         label.innerHTML = `◆&nbsp;Halting&nbsp;<b>${stopped}</b>/${total} <span class="sa-bar">${filled}${empty}</span>`;
     }
 
-    async function quash(card) {
-        const id = card.getAttribute('data-service-id');
+    function renderWaitingHud() {
+        if (!label) return;
+        label.innerHTML = '◆&nbsp;Halting…';
+    }
+
+    function markQuashing(card) {
         card.classList.remove('stop-failed');
         card.classList.add('quashing');
         setPill(card, 'Stopping');
-        try {
-            const res = await fetch('/Manage/Services/' + id + '/Stop', {
-                method: 'POST',
-                headers: {
-                    'Accept': 'application/json',
-                    'X-Requested-With': 'XMLHttpRequest',
-                    'RequestVerificationToken': token
-                }
-            });
-            const data = res.ok ? await res.json() : null;
-            if (data && data.success) {
-                // polling will flip it to Stopped and fire the offline pop
-                return true;
+    }
+
+    function markOutcome(outcome) {
+        const card = root.querySelector(`.service-card[data-service-id="${outcome.serviceId}"]`);
+        if (!card) return;
+        if (outcome.success) {
+            // The StopAll call has completed this service; polling will also confirm it.
+            setPill(card, 'Stopped');
+            card.classList.remove('quashing', 'stop-failed');
+            const pill = card.querySelector('[data-field="runtime"]');
+            if (pill) {
+                pill.classList.remove('offline-pop');
+                void pill.offsetWidth;
+                pill.classList.add('offline-pop');
+                pill.addEventListener('animationend', () => pill.classList.remove('offline-pop'), { once: true });
             }
-        } catch (_) { /* fall through to failure */ }
-        card.classList.remove('quashing');
-        card.classList.add('stop-failed');
-        return false;
+        } else {
+            card.classList.remove('quashing');
+            card.classList.add('stop-failed');
+        }
+    }
+
+    async function runStopAll() {
+        const res = await fetch('/Manage/Services/StopAll', {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'RequestVerificationToken': token
+            }
+        });
+        if (!res.ok) return null;
+        return await res.json();
+    }
+
+    async function animateTargets(targets) {
+        if (targets.length === 0) {
+            renderWaitingHud();
+            return;
+        }
+
+        let processed = 0;
+        renderHud(0, 0, targets.length);
+        for (const card of targets) {
+            markQuashing(card);
+            processed++;
+            renderHud(0, processed, targets.length);
+            if (STAGGER) await new Promise(r => setTimeout(r, STAGGER));
+        }
     }
 
     async function powerDown() {
         const targets = stoppable();
-        if (targets.length === 0) {
-            flash('info', 'Nothing to stop — no services are running.');
-            return;
-        }
 
         btn.disabled = true;
         btn.classList.add('stopping');
-        let stopped = 0, failed = 0, processed = 0;
-        renderHud(0, 0, targets.length);
-
-        for (const card of targets) {
-            const ok = await quash(card);
-            if (ok) stopped++; else failed++;
-            processed++;
-            renderHud(stopped, processed, targets.length);
-            if (STAGGER) await new Promise(r => setTimeout(r, STAGGER));
+        let data = null;
+        try {
+            const [stopAllResult] = await Promise.all([runStopAll(), animateTargets(targets)]);
+            data = stopAllResult;
+        } catch (_) {
+            data = null;
+        } finally {
+            btn.disabled = false;
+            btn.classList.remove('stopping');
+            if (label) label.innerHTML = idleLabel;
         }
 
-        btn.disabled = false;
-        btn.classList.remove('stopping');
-        if (label) label.innerHTML = idleLabel;
+        if (!data) {
+            for (const card of targets) {
+                card.classList.remove('quashing');
+                card.classList.add('stop-failed');
+            }
+            flash('error', 'Stop all failed.');
+            return;
+        }
 
+        const outcomes = Array.isArray(data.outcomes) ? data.outcomes : [];
+        for (const outcome of outcomes) {
+            markOutcome(outcome);
+        }
+
+        const stopped = Number(data.stopped) || 0;
+        const failed = outcomes.filter(o => !o.success).length;
+        if (stopped === 0 && failed === 0) {
+            flash('info', 'Nothing to stop — no services are running.');
+            return;
+        }
         if (failed === 0) {
             flash('info', `✦ Deck powered down — ${stopped} ${stopped === 1 ? 'service' : 'services'} halted.`);
         } else {

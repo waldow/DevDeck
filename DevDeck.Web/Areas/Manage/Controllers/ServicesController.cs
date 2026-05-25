@@ -339,6 +339,21 @@ public sealed class ServicesController : Controller
     public async Task<IActionResult> StopAll(CancellationToken cancellationToken)
     {
         var result = await _manager.StopAllAsync(cancellationToken);
+        if (WantsJson())
+        {
+            return Json(new
+            {
+                success = result.Outcomes.All(o => o.Success),
+                stopped = result.Stopped,
+                outcomes = result.Outcomes.Select(o => new
+                {
+                    serviceId = o.ServiceId,
+                    serviceName = o.ServiceName,
+                    success = o.Success,
+                    message = o.Message,
+                }),
+            });
+        }
         TempData["Info"] = $"Stopped {result.Stopped} services.";
         return RedirectToAction("Index", "Dashboard");
     }
