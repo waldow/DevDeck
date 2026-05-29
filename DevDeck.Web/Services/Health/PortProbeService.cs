@@ -37,13 +37,16 @@ public sealed class PortProbeService
     }
 
     public async Task<bool> IsPortOpenAsync(int port, CancellationToken cancellationToken = default)
+        => await IsEndpointOpenAsync("127.0.0.1", port, cancellationToken);
+
+    public async Task<bool> IsEndpointOpenAsync(string host, int port, CancellationToken cancellationToken = default)
     {
         try
         {
             using var client = new TcpClient();
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             cts.CancelAfter(TimeSpan.FromMilliseconds(250));
-            await client.ConnectAsync("127.0.0.1", port, cts.Token);
+            await client.ConnectAsync(host, port, cts.Token);
             return client.Connected;
         }
         catch

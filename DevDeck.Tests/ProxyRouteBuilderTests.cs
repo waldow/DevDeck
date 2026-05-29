@@ -202,7 +202,33 @@ public sealed class ProxyRouteBuilderTests
         metadata!["DevDeck.ServiceId"].Should().Be("7");
         metadata["DevDeck.AutoStartService"].Should().Be("True");
         metadata["DevDeck.RequireHealthyDestination"].Should().Be("True");
+        metadata["DevDeck.DestinationHost"].Should().Be("localhost");
         metadata["DevDeck.DestinationPort"].Should().Be("5173");
+    }
+
+    [Fact]
+    public void Build_adds_destination_host_metadata_from_destination_url()
+    {
+        var routes = new[]
+        {
+            new ProxyRoute
+            {
+                Id = 42,
+                Name = "PrivateHost",
+                Enabled = true,
+                DevServiceId = 7,
+                MatchPath = "/api/{**catch-all}",
+                PathTransformMode = "None",
+                DestinationUrlOverride = "http://192.168.1.50:5000/",
+            },
+        };
+
+        var result = _builder.Build(routes);
+
+        result.Routes.Should().ContainSingle();
+        var metadata = result.Routes[0].Metadata!;
+        metadata["DevDeck.DestinationHost"].Should().Be("192.168.1.50");
+        metadata["DevDeck.DestinationPort"].Should().Be("5000");
     }
 
     [Fact]
@@ -234,6 +260,7 @@ public sealed class ProxyRouteBuilderTests
         var result = _builder.Build(routes);
 
         result.Routes.Should().ContainSingle();
+        result.Routes[0].Metadata!["DevDeck.DestinationHost"].Should().Be("localhost");
         result.Routes[0].Metadata!["DevDeck.DestinationPort"].Should().Be("5173");
     }
 

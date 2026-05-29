@@ -50,9 +50,11 @@ public sealed class ProxyRouteBuilder
             }
 
             var destinationUrl = NormalizeDestination(destination.Url);
-            var destinationPort = Uri.TryCreate(destinationUrl, UriKind.Absolute, out var destinationUri)
-                ? destinationUri.Port
-                : (int?)null;
+            var destinationUri = Uri.TryCreate(destinationUrl, UriKind.Absolute, out var parsedDestination)
+                ? parsedDestination
+                : null;
+            var destinationHost = destinationUri?.Host;
+            var destinationPort = destinationUri?.Port;
 
             var validation = _validator.Validate(destinationUrl);
             if (!validation.IsValid)
@@ -76,7 +78,7 @@ public sealed class ProxyRouteBuilder
                 },
                 Transforms = BuildTransforms(route),
                 AuthorizationPolicy = string.IsNullOrWhiteSpace(route.AuthorizationPolicy) ? null : route.AuthorizationPolicy,
-                Metadata = BuildMetadata(route, destinationPort),
+                Metadata = BuildMetadata(route, destinationHost, destinationPort),
             };
 
             var clusterConfig = new ClusterConfig
@@ -180,7 +182,7 @@ public sealed class ProxyRouteBuilder
         return new DestinationResolution(rendered.Text, rendered.UnknownPlaceholders);
     }
 
-    private static IReadOnlyDictionary<string, string> BuildMetadata(ProxyRoute route, int? destinationPort)
+    private static IReadOnlyDictionary<string, string> BuildMetadata(ProxyRoute route, string? destinationHost, int? destinationPort)
     {
         var metadata = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -192,6 +194,11 @@ public sealed class ProxyRouteBuilder
         if (route.DevServiceId is int serviceId)
         {
             metadata["DevDeck.ServiceId"] = serviceId.ToString();
+        }
+
+        if (!string.IsNullOrWhiteSpace(destinationHost))
+        {
+            metadata["DevDeck.DestinationHost"] = destinationHost;
         }
 
         if (destinationPort is int port)

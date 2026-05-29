@@ -9,6 +9,7 @@ public sealed class HealthCheckBackgroundService : BackgroundService
 {
     private readonly IDbContextFactory<DevDeckDbContext> _dbFactory;
     private readonly IDevDeckProcessManager _processManager;
+    private readonly PortProbeService _portProbe;
     private readonly CommandTemplateRenderer _renderer;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly HealthStatusCache _healthStatusCache;
@@ -17,6 +18,7 @@ public sealed class HealthCheckBackgroundService : BackgroundService
     public HealthCheckBackgroundService(
         IDbContextFactory<DevDeckDbContext> dbFactory,
         IDevDeckProcessManager processManager,
+        PortProbeService portProbe,
         CommandTemplateRenderer renderer,
         IHttpClientFactory httpClientFactory,
         HealthStatusCache healthStatusCache,
@@ -24,6 +26,7 @@ public sealed class HealthCheckBackgroundService : BackgroundService
     {
         _dbFactory = dbFactory;
         _processManager = processManager;
+        _portProbe = portProbe;
         _renderer = renderer;
         _httpClientFactory = httpClientFactory;
         _healthStatusCache = healthStatusCache;
@@ -67,7 +70,8 @@ public sealed class HealthCheckBackgroundService : BackgroundService
         foreach (var check in checks)
         {
             if (check.LastCheckedUtc is not null &&
-                now - check.LastCheckedUtc < TimeSpan.FromSeconds(check.IntervalSeconds))
+                now - check.LastCheckedUtc < TimeSpan.FromSeconds(check.IntervalSeconds) &&
+                !string.Equals(check.LastStatus, HealthStatusNames.NotRunning, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
@@ -75,8 +79,13 @@ public sealed class HealthCheckBackgroundService : BackgroundService
             var service = check.DevService;
             check.LastCheckedUtc = now;
 
+            var url = _renderer.Render(
+                check.Url,
+                CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.Port, service.WorkingDirectory)).Text;
+
             var running = _processManager.GetRunningProcess(service.Id);
-            if (running is null)
+            var externalEndpointUp = running is null && await IsEndpointOpenAsync(url, token);
+            if (running is null && !externalEndpointUp)
             {
                 check.LastStatus = HealthStatusNames.NotRunning;
                 check.LastStatusCode = null;
@@ -84,10 +93,6 @@ public sealed class HealthCheckBackgroundService : BackgroundService
                 _healthStatusCache.Set(service.Id, check.Id, check.LastStatus);
                 continue;
             }
-
-            var url = _renderer.Render(
-                check.Url,
-                CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.Port, service.WorkingDirectory)).Text;
 
             try
             {
@@ -116,5 +121,15 @@ public sealed class HealthCheckBackgroundService : BackgroundService
         }
 
         await db.SaveChangesAsync(token);
+    }
+
+    private async Task<bool> IsEndpointOpenAsync(string url, CancellationToken cancellationToken)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        return await _portProbe.IsEndpointOpenAsync(uri.Host, uri.Port, cancellationToken);
     }
 }

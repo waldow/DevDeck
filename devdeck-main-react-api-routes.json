@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "routes": [
+    {
+      "name": "Catalog",
+      "enabled": true,
+      "serviceName": "FunctionAppCatalog",
+      "destinationUrlOverride": "http://localhost:7071/",
+      "matchPath": "/api/Catalog/{**catch-all}",
+      "order": 0,
+      "pathTransformMode": "RemoveAndAddPrefix",
+      "pathPrefixToRemove": "/api/Catalog",
+      "pathPrefixToAdd": "/api",
+      "preserveHostHeader": false,
+      "autoStartService": false,
+      "requireHealthyDestination": false,
+      "showOnDashboard": true
+    },
+    {
+      "name": "Orders",
+      "enabled": true,
+      "serviceName": "FunctionAppOrders",
+      "destinationUrlOverride": "http://localhost:7072/",
+      "matchPath": "/api/Orders/{**catch-all}",
+      "order": 1,
+      "pathTransformMode": "RemoveAndAddPrefix",
+      "pathPrefixToRemove": "/api/Orders",
+      "pathPrefixToAdd": "/api",
+      "preserveHostHeader": false,
+      "autoStartService": false,
+      "requireHealthyDestination": false,
+      "showOnDashboard": true
+    },
+    {
+      "name": "Main site",
+      "enabled": true,
+      "serviceName": "Main site",
+      "destinationUrlOverride": "http://localhost:6422/",
+      "matchPath": "/{**catch-all}",
+      "order": 100,
+      "pathTransformMode": "None",
+      "preserveHostHeader": false,
+      "autoStartService": false,
+      "requireHealthyDestination": false,
+      "showOnDashboard": true
+    }
+  ]
+}

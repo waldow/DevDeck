@@ -36,11 +36,21 @@ public sealed class ProxyRequestGuard
         if (!isRunning)
         {
             // An externally-launched instance (e.g. a backend started manually or under a debugger
-            // in Visual Studio) may already be listening on the destination port. If so, forward to
+            // in Visual Studio) may already be listening at the destination. If so, forward to
             // it rather than returning 503 — and fall through to the health gate below for consistency.
             var externalInstanceUp =
-                TryGetInt(metadata, "DevDeck.DestinationPort", out var destPort)
-                && await _portProbe.IsPortOpenAsync(destPort, context.RequestAborted);
+                TryGetString(metadata, "DevDeck.DestinationHost", out var destHost)
+                && TryGetInt(metadata, "DevDeck.DestinationPort", out var destPort)
+                && await _portProbe.IsEndpointOpenAsync(destHost, destPort, context.RequestAborted);
+
+            if (externalInstanceUp)
+            {
+                var healthStatus = _healthStatusCache.Get(serviceId);
+                if (IsNotRunning(healthStatus))
+                {
+                    _healthStatusCache.MarkStarting(serviceId, TimeSpan.FromSeconds(15));
+                }
+            }
 
             if (!externalInstanceUp)
             {
@@ -109,8 +119,23 @@ public sealed class ProxyRequestGuard
         return metadata.TryGetValue(key, out var text) && int.TryParse(text, out value);
     }
 
+    private static bool TryGetString(IReadOnlyDictionary<string, string> metadata, string key, out string value)
+    {
+        if (metadata.TryGetValue(key, out var text) && !string.IsNullOrWhiteSpace(text))
+        {
+            value = text;
+            return true;
+        }
+
+        value = string.Empty;
+        return false;
+    }
+
     private static bool TryGetBool(IReadOnlyDictionary<string, string> metadata, string key) =>
         metadata.TryGetValue(key, out var text) && bool.TryParse(text, out var value) && value;
+
+    private static bool IsNotRunning(string status) =>
+        string.Equals(status, HealthStatusNames.NotRunning, StringComparison.OrdinalIgnoreCase);
 
     private static async Task WriteUnavailableAsync(HttpContext context, int serviceId, string message)
     {
