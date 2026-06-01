@@ -41,17 +41,40 @@ public sealed class PortProbeService
 
     public async Task<bool> IsEndpointOpenAsync(string host, int port, CancellationToken cancellationToken = default)
     {
-        try
+        foreach (var candidate in ProbeHosts(host))
         {
-            using var client = new TcpClient();
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(TimeSpan.FromMilliseconds(250));
-            await client.ConnectAsync(host, port, cts.Token);
-            return client.Connected;
+            try
+            {
+                using var client = new TcpClient();
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                cts.CancelAfter(TimeSpan.FromMilliseconds(250));
+                await client.ConnectAsync(candidate, port, cts.Token);
+                if (client.Connected)
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+                // Try the next loopback alias or report closed below.
+            }
         }
-        catch
-        {
-            return false;
-        }
+
+        return false;
     }
+
+    private static IEnumerable<string> ProbeHosts(string host)
+    {
+        if (IsLocalhost(host))
+        {
+            yield return "127.0.0.1";
+            yield return "::1";
+        }
+
+        yield return host;
+    }
+
+    private static bool IsLocalhost(string host) =>
+        host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+        || host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase);
 }

@@ -35,24 +35,26 @@ public sealed class ProxyRequestGuard
         var isRunning = _processManager.GetRunningProcess(serviceId) is not null;
         if (!isRunning)
         {
-            // An externally-launched instance (e.g. a backend started manually or under a debugger
-            // in Visual Studio) may already be listening at the destination. If so, forward to
-            // it rather than returning 503 — and fall through to the health gate below for consistency.
-            var externalInstanceUp =
-                TryGetString(metadata, "DevDeck.DestinationHost", out var destHost)
-                && TryGetInt(metadata, "DevDeck.DestinationPort", out var destPort)
-                && await _portProbe.IsEndpointOpenAsync(destHost, destPort, context.RequestAborted);
-
-            if (externalInstanceUp)
+            if (TryGetBool(metadata, "DevDeck.UseExternalInstance"))
             {
+                var externalInstanceUp =
+                    TryGetString(metadata, "DevDeck.DestinationHost", out var destHost)
+                    && TryGetInt(metadata, "DevDeck.DestinationPort", out var destPort)
+                    && await _portProbe.IsEndpointOpenAsync(destHost, destPort, context.RequestAborted);
+
+                if (!externalInstanceUp)
+                {
+                    await WriteUnavailableAsync(context, serviceId, "The external passthru instance is not reachable.");
+                    return false;
+                }
+
                 var healthStatus = _healthStatusCache.Get(serviceId);
-                if (IsNotRunning(healthStatus))
+                if (NeedsWarmup(healthStatus))
                 {
                     _healthStatusCache.MarkStarting(serviceId, TimeSpan.FromSeconds(15));
                 }
             }
-
-            if (!externalInstanceUp)
+            else
             {
                 var routeAllowsAutoStart = TryGetBool(metadata, "DevDeck.AutoStartService");
                 var globalAutoStartEnabled = _options.CurrentValue.ReverseProxy.EnableAutoStartOnRequest;
@@ -134,8 +136,10 @@ public sealed class ProxyRequestGuard
     private static bool TryGetBool(IReadOnlyDictionary<string, string> metadata, string key) =>
         metadata.TryGetValue(key, out var text) && bool.TryParse(text, out var value) && value;
 
-    private static bool IsNotRunning(string status) =>
-        string.Equals(status, HealthStatusNames.NotRunning, StringComparison.OrdinalIgnoreCase);
+    private static bool NeedsWarmup(string status) =>
+        string.Equals(status, HealthStatusNames.Unknown, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(status, HealthStatusNames.NotRunning, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(status, HealthStatusNames.Warming, StringComparison.OrdinalIgnoreCase);
 
     private static async Task WriteUnavailableAsync(HttpContext context, int serviceId, string message)
     {

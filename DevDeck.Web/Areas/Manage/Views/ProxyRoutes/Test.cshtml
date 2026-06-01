@@ -8,10 +8,23 @@
 <div class="card card-pad">
     <dl class="kv">
         <dt>Route enabled</dt><dd>@(Model.Enabled ? "yes" : "no")</dd>
+        <dt>Requires healthy destination</dt><dd>@(Model.RequireHealthyDestination ? "yes" : "no")</dd>
         <dt>Match path</dt><dd class="mono">@Model.MatchPath</dd>
         <dt>Destination URL</dt><dd class="mono">@(Model.DestinationUrl ?? "—")</dd>
+        @if (Model.HasLinkedService)
+        {
+            <dt>Destination mode</dt><dd>@(Model.UseExternalInstance ? "external passthru" : "DevDeck-managed")</dd>
+            @if (Model.UseExternalInstance)
+            {
+                <dt>Passthru port</dt><dd>@(Model.EffectivePort?.ToString() ?? "—")</dd>
+            }
+            else
+            {
+                <dt>Managed port</dt><dd>@(Model.ManagedPort?.ToString() ?? "—")</dd>
+            }
+        }
         <dt>Destination port open</dt><dd>@(Model.DestinationPortOpen ? "yes" : "no")</dd>
-        <dt>Service running</dt><dd>@(Model.ServiceRunning ? "yes" : "no")</dd>
+        <dt>@(Model.UseExternalInstance ? "DevDeck process" : "Service running")</dt><dd>@(Model.UseExternalInstance ? "not used (passthru)" : (Model.ServiceRunning ? "yes" : "no"))</dd>
         <dt>Health status</dt><dd><span class="pill pill-@(Model.HealthStatus.ToLower())">@Model.HealthStatus</span></dd>
         <dt>Example proxy URL</dt><dd><a href="@Model.ExampleProxyUrl" target="_blank" rel="noopener">@Model.ExampleProxyUrl</a></dd>
     </dl>

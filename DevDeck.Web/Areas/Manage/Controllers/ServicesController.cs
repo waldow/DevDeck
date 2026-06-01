@@ -252,6 +252,7 @@ public sealed class ServicesController : Controller
         SyncHealthChecks(db, entity, model);
 
         await db.SaveChangesAsync();
+        await _proxyProvider.ReloadAsync();
         return RedirectToAction(nameof(Index));
     }
 
@@ -446,6 +447,10 @@ public sealed class ServicesController : Controller
         }
 
         var result = await _importer.ImportServicesAsync(payload, cancellationToken);
+        if (result.TotalAffected > 0)
+        {
+            await _proxyProvider.ReloadAsync(cancellationToken);
+        }
         TempData[result.HasErrors ? "Error" : "Info"] = result.ToFlashMessage();
         TempData["ImportWarnings"] = JsonSerializer.Serialize(result.Warnings.Concat(result.Errors).ToList());
         return RedirectToAction(nameof(Index));

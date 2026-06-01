@@ -227,6 +227,7 @@ public sealed class ProxyRoutesController : Controller
             Id = entity.Id,
             Name = entity.Name,
             Enabled = entity.Enabled,
+            RequireHealthyDestination = entity.RequireHealthyDestination,
             MatchPath = entity.MatchPath,
             DestinationUrl = destinationUrl,
             ExampleProxyUrl = $"{_options.Value.ReverseProxy.GatewayBaseUrl.TrimEnd('/')}{Controllers.DashboardController.ExampleProxyPath(entity.MatchPath)}",
@@ -234,20 +235,22 @@ public sealed class ProxyRoutesController : Controller
 
         if (entity.DevService is not null)
         {
+            vm.HasLinkedService = true;
+            vm.UseExternalInstance = entity.DevService.UseExternalInstance;
+            vm.ManagedPort = entity.DevService.Port;
+            vm.ExternalPort = entity.DevService.ExternalPort;
+            vm.EffectivePort = entity.DevService.EffectivePort;
             vm.ServiceRunning = _manager.GetRunningProcess(entity.DevService.Id) is not null;
-            if (entity.DevService.Port is int port)
-            {
-                vm.DestinationPortOpen = await _portProbe.IsPortOpenAsync(port);
-            }
             var hc = await db.ServiceHealthChecks
                 .Where(h => h.DevServiceId == entity.DevService.Id && h.Enabled)
                 .OrderByDescending(h => h.LastCheckedUtc)
                 .FirstOrDefaultAsync();
             vm.HealthStatus = hc?.LastStatus ?? "Unknown";
         }
-        else if (destinationUrl is not null && Uri.TryCreate(destinationUrl, UriKind.Absolute, out var uri))
+
+        if (destinationUrl is not null && Uri.TryCreate(destinationUrl, UriKind.Absolute, out var uri))
         {
-            vm.DestinationPortOpen = await _portProbe.IsPortOpenAsync(uri.Port);
+            vm.DestinationPortOpen = await _portProbe.IsEndpointOpenAsync(uri.Host, uri.Port);
         }
 
         if (ReservedPaths.IsReserved(entity.MatchPath, out var reason, _options.Value.ReverseProxy.AllowCatchAllRoutes))
@@ -417,7 +420,7 @@ public sealed class ProxyRoutesController : Controller
     {
         return _renderer.Render(
             url,
-            CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.Port, service.WorkingDirectory));
+            CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.EffectivePort, service.WorkingDirectory));
     }
 
     private static string? NormalizeOptional(string? value) =>

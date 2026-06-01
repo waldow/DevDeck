@@ -29,6 +29,26 @@ public sealed class PortProbeServiceTests
         }
     }
 
+    [Fact]
+    public async Task IsEndpointOpenAsync_treats_localhost_subdomains_as_loopback()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            var probe = new PortProbeService(new FakeProcessManager());
+
+            var open = await probe.IsEndpointOpenAsync("api.localhost", port);
+
+            open.Should().BeTrue();
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
     private sealed class FakeProcessManager : IDevDeckProcessManager
     {
         public Task<StartServiceResult> StartServiceAsync(int serviceId, CancellationToken cancellationToken) =>

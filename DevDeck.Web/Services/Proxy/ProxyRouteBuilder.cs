@@ -196,6 +196,11 @@ public sealed class ProxyRouteBuilder
             metadata["DevDeck.ServiceId"] = serviceId.ToString();
         }
 
+        if (route.DevService is not null)
+        {
+            metadata["DevDeck.UseExternalInstance"] = route.DevService.UseExternalInstance.ToString();
+        }
+
         if (!string.IsNullOrWhiteSpace(destinationHost))
         {
             metadata["DevDeck.DestinationHost"] = destinationHost;

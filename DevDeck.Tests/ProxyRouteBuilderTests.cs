@@ -297,6 +297,7 @@ public sealed class ProxyRouteBuilderTests
         result.Routes.Should().ContainSingle();
         // The destination resolves to the external port, not the managed port.
         result.Routes[0].Metadata!["DevDeck.DestinationPort"].Should().Be("7071");
+        result.Routes[0].Metadata!["DevDeck.UseExternalInstance"].Should().Be("True");
         result.Clusters[0].Destinations!["destination-0"].Address.Should().Be("http://localhost:7071/");
     }
 
