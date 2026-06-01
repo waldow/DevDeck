@@ -39,6 +39,8 @@ public sealed class PortabilityExporter
                 Port = s.Port,
                 Enabled = s.Enabled,
                 AutoStart = s.AutoStart,
+                UseExternalInstance = s.UseExternalInstance,
+                ExternalPort = s.ExternalPort,
                 DisplayOrder = s.DisplayOrder,
                 EnvironmentVariables = s.EnvironmentVariables
                     .OrderBy(e => e.Key)

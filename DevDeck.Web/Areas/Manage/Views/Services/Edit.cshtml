@@ -69,6 +69,18 @@
                 <label><input asp-for="AutoStart" type="checkbox" /> Auto-start with DevDeck</label>
             </div>
 
+            <label></label>
+            <div class="form-row">
+                <label class="check-strong"><input asp-for="UseExternalInstance" type="checkbox" id="UseExternalInstance" /> Use external instance (passthru)</label>
+                <span class="hint">DevDeck won't launch this service — it proxies to, health-checks, and reports the status of an instance you run yourself (e.g. under the Visual&nbsp;Studio debugger).</span>
+            </div>
+
+            <label for="ExternalPort">External port</label>
+            <div class="form-row">
+                <input asp-for="ExternalPort" type="number" placeholder="7071" />
+                <span class="hint">Port of the externally-running instance. Defaults to the dev port (7071 for Azure Functions).</span>
+            </div>
+
             <label for="DisplayOrder">Display order</label>
             <div class="form-row"><input asp-for="DisplayOrder" type="number" /></div>
         </div>

@@ -186,6 +186,8 @@ public sealed class PortabilityImporter
         entity.Port = s.Port;
         entity.Enabled = s.Enabled;
         entity.AutoStart = s.AutoStart;
+        entity.UseExternalInstance = s.UseExternalInstance;
+        entity.ExternalPort = s.ExternalPort;
         entity.DisplayOrder = s.DisplayOrder;
     }
 

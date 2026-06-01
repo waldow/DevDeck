@@ -81,7 +81,7 @@ public sealed class HealthCheckBackgroundService : BackgroundService
 
             var url = _renderer.Render(
                 check.Url,
-                CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.Port, service.WorkingDirectory)).Text;
+                CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.EffectivePort, service.WorkingDirectory)).Text;
 
             var running = _processManager.GetRunningProcess(service.Id);
             var externalEndpointUp = running is null && await IsEndpointOpenAsync(url, token);

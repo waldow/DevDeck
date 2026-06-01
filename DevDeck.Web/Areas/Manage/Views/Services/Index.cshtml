@@ -49,21 +49,24 @@ else
             @foreach (var s in Model)
             {
                 var isRunning = running.Contains(s.Id);
+                var isExternal = s.UseExternalInstance;
                 var hasHealth = s.HealthChecks.Any(h => h.Enabled);
-                var healthText = isRunning ? "Unknown" : "NotRunning";
+                var healthText = (isRunning || isExternal) ? "Unknown" : "NotRunning";
+                var runtimeText = isExternal ? "External" : (isRunning ? "Running" : "Stopped");
                 var portConflict = s.Port is int prt && conflictPorts.Contains(prt);
-                <tr class="svc-row" data-service-id="@s.Id" data-enabled="@s.Enabled.ToString().ToLowerInvariant()">
+                <tr class="svc-row" data-service-id="@s.Id" data-enabled="@s.Enabled.ToString().ToLowerInvariant()" data-external="@isExternal.ToString().ToLowerInvariant()">
                     <td>
                         <div class="status-cell">
                             <a asp-action="Details" asp-route-id="@s.Id"><strong>@s.Name</strong></a>
                             @if (!s.Enabled) { <span class="pill pill-stopped">disabled</span> }
                             @if (s.AutoStart) { <span class="pill pill-info">auto</span> }
+                            @if (isExternal) { <span class="pill pill-tag" title="DevDeck proxies to an instance you run yourself">passthru</span> }
                         </div>
                     </td>
                     <td class="mono">@s.ServiceType</td>
                     <td class="mono dim" title="@s.WorkingDirectory">@System.IO.Path.GetFileName(s.WorkingDirectory.TrimEnd('/', '\\'))</td>
                     <td class="mono">
-                        @(s.Port?.ToString() ?? "—")
+                        @(s.EffectivePort?.ToString() ?? "—")
                         @if (portConflict)
                         {
                             <span class="port-conflict" title="Port @s.Port is in use by another process">in use</span>
@@ -71,7 +74,7 @@ else
                     </td>
                     <td>
                         <div class="status-cell">
-                            <span class="pill pill-@(isRunning ? "running" : "stopped")" data-field="runtime">@(isRunning ? "Running" : "Stopped")</span>
+                            <span class="pill pill-@(runtimeText.ToLower())" data-field="runtime">@runtimeText</span>
                             @if (hasHealth)
                             {
                                 <span class="pill pill-@(healthText.ToLower())" data-field="health">@healthText</span>
@@ -80,14 +83,15 @@ else
                     </td>
                     <td>
                         <div class="btn-row">
-                            <div class="row-actions" data-when="running" @(isRunning ? null : "hidden")>
+                            <div class="row-actions" data-when="running" @(isRunning && !isExternal ? null : "hidden")>
                                 <form class="inline" method="post" asp-action="Stop" asp-route-id="@s.Id">@Html.AntiForgeryToken()<button class="btn btn-warn" type="submit">Stop</button></form>
                                 <form class="inline" method="post" asp-action="Restart" asp-route-id="@s.Id">@Html.AntiForgeryToken()<button class="btn" type="submit">Restart</button></form>
                             </div>
-                            <div class="row-actions" data-when="stopped" @(isRunning ? "hidden" : null)>
+                            <div class="row-actions" data-when="stopped" @(!isRunning && !isExternal ? null : "hidden")>
                                 <form class="inline" method="post" asp-action="Start" asp-route-id="@s.Id">@Html.AntiForgeryToken()<button class="btn btn-ok" type="submit">Start</button></form>
                             </div>
                             <div class="row-actions">
+                                <form class="inline js-toggle-external" method="post" asp-action="ToggleExternal" asp-route-id="@s.Id">@Html.AntiForgeryToken()<button class="btn btn-ghost" type="submit" title="Switch between DevDeck-managed and an external (passthru) instance">@(isExternal ? "Manage here" : "Use external")</button></form>
                                 <a class="btn" asp-action="Edit" asp-route-id="@s.Id">Edit</a>
                                 <a class="btn btn-ghost" asp-area="Manage" asp-controller="Logs" asp-action="ServiceLogs" asp-route-id="@s.Id">Logs</a>
                                 <a class="btn btn-ghost" asp-action="ExportOne" asp-route-id="@s.Id" title="Download this service as JSON">Export</a>

@@ -36,9 +36,15 @@
 
     // Show the action group that matches the current runtime state.
     function reconcileActions(row, runtimeStatus) {
-        const isUp = RUNNING_STATES.has(runtimeStatus.toLowerCase());
         const runGroup = row.querySelector('.row-actions[data-when="running"]');
         const stopGroup = row.querySelector('.row-actions[data-when="stopped"]');
+        // Passthru (external) services have no lifecycle DevDeck controls — keep both hidden.
+        if (row.getAttribute('data-external') === 'true') {
+            if (runGroup) runGroup.hidden = true;
+            if (stopGroup) stopGroup.hidden = true;
+            return;
+        }
+        const isUp = RUNNING_STATES.has(runtimeStatus.toLowerCase());
         if (runGroup) runGroup.hidden = !isUp;
         if (stopGroup) stopGroup.hidden = isUp;
     }

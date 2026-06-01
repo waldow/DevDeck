@@ -177,7 +177,7 @@ public sealed class ProxyRouteBuilder
         var service = route.DevService;
         var rendered = _renderer.Render(
             url,
-            CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.Port, service.WorkingDirectory));
+            CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.EffectivePort, service.WorkingDirectory));
 
         return new DestinationResolution(rendered.Text, rendered.UnknownPlaceholders);
     }

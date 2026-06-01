@@ -7,6 +7,7 @@ using DevDeck.Web.Services.Commands;
 using DevDeck.Web.Services.Health;
 using DevDeck.Web.Options;
 using DevDeck.Web.Services.Portability;
+using DevDeck.Web.Services.Proxy;
 using DevDeck.Web.Services.Runtime;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -24,6 +25,7 @@ public sealed class ServicesController : Controller
     private readonly PortProbeService _portProbe;
     private readonly PortabilityExporter _exporter;
     private readonly PortabilityImporter _importer;
+    private readonly DevDeckProxyConfigProvider _proxyProvider;
     private readonly IOptions<DevDeckOptions> _options;
 
     public ServicesController(
@@ -33,6 +35,7 @@ public sealed class ServicesController : Controller
         PortProbeService portProbe,
         PortabilityExporter exporter,
         PortabilityImporter importer,
+        DevDeckProxyConfigProvider proxyProvider,
         IOptions<DevDeckOptions> options)
     {
         _dbFactory = dbFactory;
@@ -41,6 +44,7 @@ public sealed class ServicesController : Controller
         _portProbe = portProbe;
         _exporter = exporter;
         _importer = importer;
+        _proxyProvider = proxyProvider;
         _options = options;
     }
 
@@ -59,8 +63,10 @@ public sealed class ServicesController : Controller
         // Best-effort, one-shot port-conflict sweep (this GET is not polled).
         // Probe every configured port in parallel; flag the ones held by a
         // non-DevDeck process so the row can surface a ⚠ marker.
+        // External (passthru) services are expected to have their port held by the instance we
+        // forward to, so they are not conflicts — skip them in the sweep.
         var probes = await Task.WhenAll(
-            services.Where(s => s.Port is int)
+            services.Where(s => s.Port is int && !s.UseExternalInstance)
                     .Select(async s => (port: s.Port!.Value,
                                         status: await _portProbe.ProbeAsync(s.Port!.Value, s.Id))));
         ViewBag.ConflictPorts = probes
@@ -132,6 +138,8 @@ public sealed class ServicesController : Controller
             Port = model.Port,
             Enabled = model.Enabled,
             AutoStart = model.AutoStart,
+            UseExternalInstance = model.UseExternalInstance,
+            ExternalPort = model.ExternalPort,
             DisplayOrder = model.DisplayOrder,
         };
         ApplyChildren(entity, model);
@@ -168,6 +176,8 @@ public sealed class ServicesController : Controller
             Port = entity.Port,
             Enabled = entity.Enabled,
             AutoStart = entity.AutoStart,
+            UseExternalInstance = entity.UseExternalInstance,
+            ExternalPort = entity.ExternalPort,
             DisplayOrder = entity.DisplayOrder,
             EnvironmentVariables = entity.EnvironmentVariables
                 .Select(e => new EnvVarEditRow
@@ -233,6 +243,8 @@ public sealed class ServicesController : Controller
         entity.Port = model.Port;
         entity.Enabled = model.Enabled;
         entity.AutoStart = model.AutoStart;
+        entity.UseExternalInstance = model.UseExternalInstance;
+        entity.ExternalPort = model.ExternalPort;
         entity.DisplayOrder = model.DisplayOrder;
         entity.UpdatedUtc = DateTimeOffset.UtcNow;
 
@@ -322,6 +334,45 @@ public sealed class ServicesController : Controller
             return Json(new { success = result.Success, serviceId = id, message = result.Message ?? result.Error });
         }
         TempData[result.Success ? "Info" : "Error"] = result.Message ?? result.Error;
+        return RedirectBackOrDashboard();
+    }
+
+    [HttpPost("{id:int}/ToggleExternal")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> ToggleExternal(int id, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        var entity = await db.DevServices.FirstOrDefaultAsync(s => s.Id == id, cancellationToken);
+        if (entity is null) return NotFound();
+
+        // Can't passthru a service DevDeck is actively running — stop it first.
+        if (!entity.UseExternalInstance && _manager.GetRunningProcess(id) is not null)
+        {
+            const string msg = "Stop the service before switching it to external (passthru) mode.";
+            if (WantsJson()) return Json(new { success = false, serviceId = id, message = msg });
+            TempData["Error"] = msg;
+            return RedirectBackOrDashboard();
+        }
+
+        entity.UseExternalInstance = !entity.UseExternalInstance;
+        if (entity.UseExternalInstance && entity.ExternalPort is null)
+        {
+            entity.ExternalPort = entity.Port ?? 7071;
+        }
+        entity.UpdatedUtc = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(cancellationToken);
+
+        // Destination port is derived from the (now-changed) effective port, so rebuild YARP.
+        await _proxyProvider.ReloadAsync();
+
+        var info = entity.UseExternalInstance
+            ? $"'{entity.Name}' now proxies to an external instance on port {entity.EffectivePort}."
+            : $"'{entity.Name}' is back under DevDeck management.";
+        if (WantsJson())
+        {
+            return Json(new { success = true, serviceId = id, useExternalInstance = entity.UseExternalInstance, externalPort = entity.EffectivePort, message = info });
+        }
+        TempData["Info"] = info;
         return RedirectBackOrDashboard();
     }
 

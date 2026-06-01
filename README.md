@@ -107,6 +107,12 @@ DevDeck collapses that into one UI. Logs stream into a single panel. Health pill
 - Transforms: `None`, `RemovePrefix`, `AddPrefix`, `RemoveAndAddPrefix`, `SetPath`.
 - Reserved paths can't be hijacked; **hot-reload** on every route edit.
 
+**🔁 Passthru to your own instance**
+- Flip any service to **external (passthru)** mode with one click — DevDeck stops launching it and instead
+  proxies to, health-checks, and reports the status of an instance you run yourself (e.g. a Functions host
+  under the Visual Studio debugger) on its dev port (7071 by default).
+- The card shows a cyan **External** pill when your instance is up, **Offline** when it isn't.
+
 **🔁 Import / Export**
 - Move services, profiles, and routes between machines as portable JSON.
 - Keyed by name, secrets masked by default.

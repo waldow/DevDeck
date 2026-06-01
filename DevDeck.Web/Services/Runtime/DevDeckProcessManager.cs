@@ -102,6 +102,10 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
             {
                 return new StartServiceResult { ServiceId = serviceId, Success = false, Error = "Service is disabled." };
             }
+            if (service.UseExternalInstance)
+            {
+                return new StartServiceResult { ServiceId = serviceId, Success = false, Error = $"'{service.Name}' uses an external instance on port {service.EffectivePort}; DevDeck does not launch it." };
+            }
             if (!Directory.Exists(service.WorkingDirectory))
             {
                 return new StartServiceResult { ServiceId = serviceId, Success = false, Error = $"Working directory does not exist: {service.WorkingDirectory}" };
@@ -388,7 +392,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
         await using (var db = await _dbFactory.CreateDbContextAsync(cancellationToken))
         {
             targets = await db.DevServices
-                .Where(s => s.Enabled)
+                .Where(s => s.Enabled && !s.UseExternalInstance)
                 .OrderBy(s => s.DisplayOrder).ThenBy(s => s.Name)
                 .Select(s => new ValueTuple<int, string>(s.Id, s.Name))
                 .ToListAsync(cancellationToken);

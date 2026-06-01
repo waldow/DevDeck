@@ -121,8 +121,15 @@ code, pre, .mono { font-family: var(--mono); }
 .pill-running, .pill-healthy { background: var(--ok-bg); color: var(--ok); }
 .pill-starting, .pill-info { background: var(--info-bg); color: var(--info); }
 .pill-stopping, .pill-unhealthy, .pill-timeout, .pill-warn { background: var(--warn-bg); color: var(--warn); }
-.pill-stopped, .pill-notrunning, .pill-unknown { background: var(--mute-bg); color: var(--text-dim); }
+.pill-stopped, .pill-notrunning, .pill-unknown, .pill-offline { background: var(--mute-bg); color: var(--text-dim); }
 .pill-crashed, .pill-failedtostart, .pill-killed { background: var(--bad-bg); color: var(--bad); }
+/* External (passthru): online, but an instance DevDeck does not own. */
+.pill-external { background: var(--accent-glow); color: var(--accent); }
+/* Inline descriptor tag (e.g. "passthru") — no status dot. */
+.pill-tag { background: var(--mute-bg); color: var(--text-dim); text-transform: lowercase; }
+.pill-tag::before { display: none; }
+/* Launch-only fields dimmed when a service is in passthru mode. */
+.field-dimmed { opacity: 0.45; }
 
 /* buttons */
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px;
@@ -546,6 +553,7 @@ body::before {
     50%      { box-shadow: 0 0 11px currentColor, 0 0 3px currentColor; opacity: 1; }
 }
 .pill-running::before,
+.pill-external::before,
 .pill-healthy::before { animation: pill-breathe 2.4s ease-in-out infinite; }
 
 /* (5) Tactile, accessible controls — buttons depress on press, the
@@ -575,6 +583,7 @@ a.btn:focus-visible,
     .sidebar nav a { transition: background 120ms, color 120ms, border-color 120ms; }
     .sidebar nav a:hover { padding-left: 12px; }
     .pill-running::before,
+    .pill-external::before,
     .pill-healthy::before { animation: none; }
     .btn:active { transform: none; }
     .btn.btn-primary::after { transition: none; }

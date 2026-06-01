@@ -139,7 +139,7 @@ internal sealed class AutoStartHostedService : IHostedService
             var manager = scope.ServiceProvider.GetRequiredService<IDevDeckProcessManager>();
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
             var ids = await db.DevServices
-                .Where(s => s.Enabled && s.AutoStart)
+                .Where(s => s.Enabled && s.AutoStart && !s.UseExternalInstance)
                 .OrderBy(s => s.DisplayOrder)
                 .Select(s => s.Id)
                 .ToListAsync(cancellationToken);

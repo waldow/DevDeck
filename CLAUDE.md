@@ -121,6 +121,19 @@ is a regression even if it compiles:
 DevDeck launches the global `azurite` CLI as a managed background process and waits for its ports. Configurable
 under `DevDeck:Azurite` (command, blob/queue/table ports, startup timeout).
 
+## Passthru / external-instance mode
+
+A service can be flipped to **passthru** mode (`DevService.UseExternalInstance` + `DevService.ExternalPort`,
+default 7071) so DevDeck stops launching/managing the process and instead proxies to, health-checks, and reports
+the status of an instance the developer runs themselves (e.g. a Functions host under the Visual Studio debugger).
+The single mechanism is `DevService.EffectivePort` (`= UseExternalInstance ? (ExternalPort ?? Port) : Port`): the
+proxy destination (`ProxyRouteBuilder.ResolveDestination`), health-check URL (`HealthCheckBackgroundService`), and
+status probe (`StatusController`) all render `{port}` from it, so flipping the switch repoints the whole stack
+coherently — toggling only needs a YARP `ReloadAsync()`. Passthru services are skipped by `StartServiceAsync`,
+`StartAllAsync`, and `AutoStartHostedService`; `StatusController.Snapshot` TCP-probes the external port and reports
+`External`/`Offline` instead of the managed `Running`/`Stopped`. Toggle via the Edit form or the one-click
+`POST /Manage/Services/{id}/ToggleExternal` (which defaults `ExternalPort` to `Port ?? 7071` and reloads the proxy).
+
 ## Portability (import / export)
 
 `PortabilityExporter` / `PortabilityImporter` round-trip services and proxy routes as JSON. Foreign references

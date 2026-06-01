@@ -264,6 +264,42 @@ public sealed class ProxyRouteBuilderTests
         result.Routes[0].Metadata!["DevDeck.DestinationPort"].Should().Be("5173");
     }
 
+    [Fact]
+    public void Build_renders_external_port_when_service_uses_external_instance()
+    {
+        var routes = new[]
+        {
+            new ProxyRoute
+            {
+                Id = 12,
+                Name = "Passthru",
+                Enabled = true,
+                DevServiceId = 7,
+                DevService = new DevService
+                {
+                    Id = 7,
+                    Name = "Functions",
+                    ServiceType = "AzureFunction",
+                    WorkingDirectory = "C:\\work\\fn",
+                    StartCommand = "func",
+                    Url = "http://localhost:{port}",
+                    Port = 7072,                  // DevDeck-managed port
+                    UseExternalInstance = true,
+                    ExternalPort = 7071,          // VS debug host port we passthru to
+                },
+                MatchPath = "/api/{**catch-all}",
+                PathTransformMode = "None",
+            },
+        };
+
+        var result = _builder.Build(routes);
+
+        result.Routes.Should().ContainSingle();
+        // The destination resolves to the external port, not the managed port.
+        result.Routes[0].Metadata!["DevDeck.DestinationPort"].Should().Be("7071");
+        result.Clusters[0].Destinations!["destination-0"].Address.Should().Be("http://localhost:7071/");
+    }
+
     private static ProxyRoute NewRoute(string mode, string? removePrefix = null, string? addPrefix = null, string? pathSet = null) => new()
     {
         Name = "r",

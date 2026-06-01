@@ -29,10 +29,10 @@ else
     <div class="grid-cards" id="cards" data-poll="@Model.PollingMilliseconds">
         @foreach (var card in Model.Cards)
         {
-            <div class="card service-card" data-service-id="@card.Id" data-enabled="@card.Enabled.ToString().ToLowerInvariant()">
+            <div class="card service-card" data-service-id="@card.Id" data-enabled="@card.Enabled.ToString().ToLowerInvariant()" data-external="@card.UseExternalInstance.ToString().ToLowerInvariant()">
                 <div class="sc-head">
                     <div>
-                        <div class="sc-name">@card.Name</div>
+                        <div class="sc-name">@card.Name @if (card.UseExternalInstance) { <span class="pill pill-tag" title="DevDeck proxies to an instance you run yourself">passthru</span> }</div>
                         <div class="sc-type">@card.ServiceType</div>
                     </div>
                     <span class="pill pill-@(card.RuntimeStatus.ToLower())" data-field="runtime">@card.RuntimeStatus</span>
@@ -58,17 +58,24 @@ else
                     <a class="btn btn-ghost" asp-area="Manage" asp-controller="Logs" asp-action="ServiceLogs" asp-route-id="@card.Id">Logs</a>
                 </div>
                 <div class="sc-actions">
-                    <form class="inline" method="post" asp-area="Manage" asp-controller="Services" asp-action="Start" asp-route-id="@card.Id">
+                    @if (!card.UseExternalInstance)
+                    {
+                        <form class="inline" method="post" asp-area="Manage" asp-controller="Services" asp-action="Start" asp-route-id="@card.Id">
+                            @Html.AntiForgeryToken()
+                            <button class="btn btn-ok" type="submit">Start</button>
+                        </form>
+                        <form class="inline" method="post" asp-area="Manage" asp-controller="Services" asp-action="Restart" asp-route-id="@card.Id">
+                            @Html.AntiForgeryToken()
+                            <button class="btn" type="submit">Restart</button>
+                        </form>
+                        <form class="inline" method="post" asp-area="Manage" asp-controller="Services" asp-action="Stop" asp-route-id="@card.Id">
+                            @Html.AntiForgeryToken()
+                            <button class="btn btn-warn" type="submit">Stop</button>
+                        </form>
+                    }
+                    <form class="inline js-toggle-external" method="post" asp-area="Manage" asp-controller="Services" asp-action="ToggleExternal" asp-route-id="@card.Id">
                         @Html.AntiForgeryToken()
-                        <button class="btn btn-ok" type="submit">Start</button>
-                    </form>
-                    <form class="inline" method="post" asp-area="Manage" asp-controller="Services" asp-action="Restart" asp-route-id="@card.Id">
-                        @Html.AntiForgeryToken()
-                        <button class="btn" type="submit">Restart</button>
-                    </form>
-                    <form class="inline" method="post" asp-area="Manage" asp-controller="Services" asp-action="Stop" asp-route-id="@card.Id">
-                        @Html.AntiForgeryToken()
-                        <button class="btn btn-warn" type="submit">Stop</button>
+                        <button class="btn btn-ghost" type="submit" title="Switch between DevDeck-managed and an external (passthru) instance">@(card.UseExternalInstance ? "Manage here" : "Use external")</button>
                     </form>
                     <a class="btn btn-ghost" asp-area="Manage" asp-controller="Services" asp-action="Details" asp-route-id="@card.Id">Details</a>
                 </div>

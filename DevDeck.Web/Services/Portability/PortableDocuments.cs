@@ -23,6 +23,8 @@ public sealed class PortableService
     public int? Port { get; set; }
     public bool Enabled { get; set; } = true;
     public bool AutoStart { get; set; }
+    public bool UseExternalInstance { get; set; }
+    public int? ExternalPort { get; set; }
     public int DisplayOrder { get; set; }
     public List<PortableEnvVar> EnvironmentVariables { get; set; } = [];
     public List<PortableHealthCheck> HealthChecks { get; set; } = [];

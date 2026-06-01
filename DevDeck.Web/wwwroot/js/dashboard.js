@@ -17,14 +17,14 @@
         } catch (_) { /* swallow */ }
     }
 
-    const OFFLINE_STATES = new Set(['pill-stopped', 'pill-crashed', 'pill-killed', 'pill-failedtostart']);
+    const OFFLINE_STATES = new Set(['pill-stopped', 'pill-crashed', 'pill-killed', 'pill-failedtostart', 'pill-offline']);
+    const ONLINE_STATES = new Set(['pill-running', 'pill-external']);
 
     function updatePill(el, value) {
         if (!el) return;
         const next = 'pill-' + value.toLowerCase();
-        const wasOffline = el.classList.contains('pill-stopped') || el.classList.contains('pill-crashed')
-            || el.classList.contains('pill-killed') || el.classList.contains('pill-failedtostart');
-        const cameOnline = next === 'pill-running' && !el.classList.contains('pill-running');
+        const wasOffline = OFFLINE_STATES.has(getPillClass(el));
+        const cameOnline = ONLINE_STATES.has(next) && !ONLINE_STATES.has(getPillClass(el));
         const wentOffline = OFFLINE_STATES.has(next) && !wasOffline;
         if (el.textContent.trim() !== value) {
             el.textContent = value;
@@ -47,6 +47,11 @@
             el.addEventListener('animationend', () => el.classList.remove('offline-pop'), { once: true });
             el.closest('.service-card')?.classList.remove('quashing');
         }
+    }
+
+    function getPillClass(el) {
+        for (const c of el.classList) { if (c.startsWith('pill-')) return c; }
+        return '';
     }
 
     setInterval(tick, poll);

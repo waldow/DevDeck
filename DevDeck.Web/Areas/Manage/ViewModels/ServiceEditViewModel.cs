@@ -25,6 +25,8 @@ public sealed class ServiceEditViewModel
     public int? Port { get; set; }
     public bool Enabled { get; set; } = true;
     public bool AutoStart { get; set; } = false;
+    public bool UseExternalInstance { get; set; } = false;
+    public int? ExternalPort { get; set; }
     public int DisplayOrder { get; set; } = 0;
 
     public List<EnvVarEditRow> EnvironmentVariables { get; set; } = new();

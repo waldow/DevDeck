@@ -1,4 +1,5 @@
 using DevDeck.Web.Data;
+using DevDeck.Web.Services.Health;
 using DevDeck.Web.Services.Runtime;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -11,19 +12,31 @@ public sealed class StatusController : Controller
 {
     private readonly IDbContextFactory<DevDeckDbContext> _dbFactory;
     private readonly IDevDeckProcessManager _manager;
+    private readonly PortProbeService _portProbe;
 
-    public StatusController(IDbContextFactory<DevDeckDbContext> dbFactory, IDevDeckProcessManager manager)
+    public StatusController(IDbContextFactory<DevDeckDbContext> dbFactory, IDevDeckProcessManager manager, PortProbeService portProbe)
     {
         _dbFactory = dbFactory;
         _manager = manager;
+        _portProbe = portProbe;
     }
 
     [HttpGet("Snapshot")]
-    public async Task<IActionResult> Snapshot()
+    public async Task<IActionResult> Snapshot(CancellationToken cancellationToken)
     {
-        await using var db = await _dbFactory.CreateDbContextAsync();
-        var services = await db.DevServices.OrderBy(s => s.DisplayOrder).ToListAsync();
-        var healthChecks = await db.ServiceHealthChecks.ToListAsync();
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        var services = await db.DevServices.OrderBy(s => s.DisplayOrder).ToListAsync(cancellationToken);
+        var healthChecks = await db.ServiceHealthChecks.ToListAsync(cancellationToken);
+
+        // Passthru services have no DevDeck-managed process, so a one-shot TCP probe of the
+        // external port is the only way to tell whether the instance is up. Probe in parallel.
+        var externalUp = (await Task.WhenAll(
+            services.Where(s => s.UseExternalInstance && s.EffectivePort is int)
+                    .Select(async s => (id: s.Id,
+                                        open: await _portProbe.IsPortOpenAsync(s.EffectivePort!.Value, cancellationToken)))))
+            .Where(p => p.open)
+            .Select(p => p.id)
+            .ToHashSet();
 
         var payload = services.Select(s =>
         {
@@ -32,14 +45,29 @@ public sealed class StatusController : Controller
                 .Where(h => h.DevServiceId == s.Id && h.Enabled)
                 .OrderByDescending(h => h.LastCheckedUtc)
                 .FirstOrDefault();
+
+            string runtimeStatus;
+            string healthStatus;
+            if (s.UseExternalInstance)
+            {
+                var open = externalUp.Contains(s.Id);
+                runtimeStatus = open ? "External" : "Offline";
+                healthStatus = open ? (hc?.LastStatus ?? "Unknown") : "NotRunning";
+            }
+            else
+            {
+                runtimeStatus = info?.Status.ToString() ?? "Stopped";
+                healthStatus = info is null ? "NotRunning" : (hc?.LastStatus ?? "Unknown");
+            }
+
             return new
             {
                 id = s.Id,
                 name = s.Name,
                 serviceType = s.ServiceType,
-                runtimeStatus = info?.Status.ToString() ?? "Stopped",
-                healthStatus = info is null ? "NotRunning" : (hc?.LastStatus ?? "Unknown"),
-                port = s.Port,
+                runtimeStatus,
+                healthStatus,
+                port = s.EffectivePort,
                 url = s.Url,
                 processId = info is null ? (int?)null : SafePid(info),
                 runId = info?.ServiceRunId,

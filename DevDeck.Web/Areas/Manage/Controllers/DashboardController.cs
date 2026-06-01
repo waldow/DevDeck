@@ -55,9 +55,14 @@ public sealed class DashboardController : Controller
                 Name = s.Name,
                 ServiceType = s.ServiceType,
                 Enabled = s.Enabled,
-                RuntimeStatus = info?.Status.ToString() ?? "Stopped",
-                HealthStatus = info is null ? "NotRunning" : (hc?.LastStatus ?? "Unknown"),
-                Port = s.Port,
+                UseExternalInstance = s.UseExternalInstance,
+                // Passthru runtime is determined by the polled snapshot's port probe; render an
+                // optimistic "External" initially and let the first tick correct it to "Offline".
+                RuntimeStatus = s.UseExternalInstance ? "External" : (info?.Status.ToString() ?? "Stopped"),
+                HealthStatus = s.UseExternalInstance
+                    ? (hc?.LastStatus ?? "Unknown")
+                    : (info is null ? "NotRunning" : (hc?.LastStatus ?? "Unknown")),
+                Port = s.EffectivePort,
                 Url = s.Url,
                 ProxyUrl = proxyUrl,
                 ProcessId = info is null ? null : SafePid(info),

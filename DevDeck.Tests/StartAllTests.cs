@@ -55,6 +55,56 @@ public sealed class StartAllTests : IDisposable
     }
 
     [Fact]
+    public async Task StartService_refuses_a_passthru_service()
+    {
+        var temp = Directory.CreateTempSubdirectory("devdeck-passthru-");
+        try
+        {
+            int serviceId;
+            await using (var db = _factory.CreateDbContext())
+            {
+                var service = new DevService
+                {
+                    Name = "external-" + Guid.NewGuid().ToString("N"),
+                    ServiceType = "AzureFunction",
+                    WorkingDirectory = temp.FullName,
+                    StartCommand = "func",
+                    Enabled = true,
+                    UseExternalInstance = true,
+                    ExternalPort = 7071,
+                };
+                db.DevServices.Add(service);
+                await db.SaveChangesAsync();
+                serviceId = service.Id;
+            }
+
+            var manager = CreateManager();
+            var result = await manager.StartServiceAsync(serviceId, CancellationToken.None);
+
+            result.Success.Should().BeFalse();
+            result.Error.Should().Contain("external instance");
+            manager.GetRunningProcess(serviceId).Should().BeNull();
+        }
+        finally
+        {
+            temp.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task StartAll_excludes_passthru_services()
+    {
+        var managed = await SeedServiceAsync("managed", displayOrder: 0, enabled: true);
+        await SeedPassthruServiceAsync("passthru", displayOrder: 1);
+
+        var manager = CreateManager();
+        var result = await manager.StartAllAsync(CancellationToken.None);
+
+        // Only the managed service is a target (and it fails on its missing working directory).
+        result.Outcomes.Select(o => o.ServiceId).Should().BeEquivalentTo(new[] { managed });
+    }
+
+    [Fact]
     public async Task AzureFunctions_start_injects_development_storage_and_runs_azurite_preflight()
     {
         var temp = Directory.CreateTempSubdirectory("devdeck-azure-functions-");
@@ -164,6 +214,25 @@ public sealed class StartAllTests : IDisposable
             WorkingDirectory = Path.Combine(Path.GetTempPath(), "devdeck-missing-" + Guid.NewGuid().ToString("N")),
             StartCommand = "dotnet",
             Enabled = enabled,
+            DisplayOrder = displayOrder,
+        };
+        db.DevServices.Add(service);
+        await db.SaveChangesAsync();
+        return service.Id;
+    }
+
+    private async Task<int> SeedPassthruServiceAsync(string name, int displayOrder)
+    {
+        await using var db = _factory.CreateDbContext();
+        var service = new DevService
+        {
+            Name = name,
+            ServiceType = "AzureFunction",
+            WorkingDirectory = Path.Combine(Path.GetTempPath(), "devdeck-missing-" + Guid.NewGuid().ToString("N")),
+            StartCommand = "func",
+            Enabled = true,
+            UseExternalInstance = true,
+            ExternalPort = 7071,
             DisplayOrder = displayOrder,
         };
         db.DevServices.Add(service);

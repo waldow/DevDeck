@@ -56,6 +56,9 @@ namespace DevDeck.Web.Migrations
                     b.Property<bool>("Enabled")
                         .HasColumnType("INTEGER");
 
+                    b.Property<int?>("ExternalPort")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -86,6 +89,9 @@ namespace DevDeck.Web.Migrations
 
                     b.Property<string>("Url")
                         .HasColumnType("TEXT");
+
+                    b.Property<bool>("UseExternalInstance")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("WorkingDirectory")
                         .IsRequired()

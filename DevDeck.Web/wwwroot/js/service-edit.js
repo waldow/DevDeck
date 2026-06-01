@@ -82,4 +82,23 @@
     urlInput?.addEventListener('input', renderPreview);
     portInput?.addEventListener('input', renderPreview);
     renderPreview();
+
+    // Passthru mode: when "Use external instance" is on, DevDeck won't launch the process,
+    // so dim the launch-only fields and surface the external port.
+    const external = document.getElementById('UseExternalInstance');
+    const externalPortRow = document.getElementById('ExternalPort')?.closest('.form-row');
+    const externalPortLabel = document.querySelector('label[for="ExternalPort"]');
+    const launchFieldIds = ['WorkingDirectory', 'StartCommand', 'StartArguments'];
+    function reconcileExternal() {
+        if (!external) return;
+        const on = external.checked;
+        if (externalPortRow) externalPortRow.style.display = on ? '' : 'none';
+        if (externalPortLabel) externalPortLabel.style.display = on ? '' : 'none';
+        for (const id of launchFieldIds) {
+            const row = document.getElementById(id)?.closest('.form-row');
+            if (row) row.classList.toggle('field-dimmed', on);
+        }
+    }
+    external?.addEventListener('change', reconcileExternal);
+    reconcileExternal();
 })();
