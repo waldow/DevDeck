@@ -17,7 +17,7 @@ logs, watch health, and route `http://localhost:5050/app`, `/api`, … to the ri
 
 - `DevDeck.slnx` — solution. Two projects, both `net10.0`:
   - `DevDeck.Web` — the application (only deps: `Microsoft.EntityFrameworkCore.Sqlite`, `Yarp.ReverseProxy`).
-  - `DevDeck.Tests` — xUnit + FluentAssertions unit tests (currently **108**, all green).
+  - `DevDeck.Tests` — xUnit + FluentAssertions unit tests (currently **167**, all green).
 - `DevDeck_Specification_v2_Reverse_Proxy.md` — the original design spec. **Historical**: v1 is fully built,
   so this is no longer a build target. Its section numbers (e.g. §8 entities, §18 proxy) are still useful as
   rationale when a change touches a documented decision — cite them, but the code is the source of truth.
@@ -57,6 +57,10 @@ Key singletons registered in `Program.cs`:
 - `AutoStartHostedService` (hosted) — on boot, starts enabled + `AutoStart` services in `DisplayOrder` (only
   when `AutoStartEnabledServices` is set).
 - `PortabilityExporter` / `PortabilityImporter` — JSON import/export.
+- `LogRetentionService` (hosted) — deletes run log files older than `LogRetentionDays` (12h sweep; `<= 0`
+  disables).
+- `StopServicesOnShutdownHostedService` (hosted) — when `StopServicesOnShutdown` is set, stops all managed
+  services on DevDeck shutdown (default: leave them running; they reconcile as orphaned runs on next start).
 
 ## Request pipeline & ordering invariants (`Program.cs`)
 
@@ -138,14 +142,18 @@ coherently — toggling only needs a YARP `ReloadAsync()`. Passthru services are
 
 `PortabilityExporter` / `PortabilityImporter` round-trip services and proxy routes as JSON. Foreign references
 use **names** (not ids) so files are portable across machines; importing updates same-named rows in place and
-creates new ones. Secrets are excluded unless `includeSecrets` is requested. The `_ImportExportToolbar`
+creates new ones. Secrets are excluded unless `includeSecrets` is requested. Route imports apply the same
+safety checks as the route editor (`ReservedPaths` + `ProxyDestinationValidator`) and skip violating rows
+with an error in the result. The `_ImportExportToolbar`
 partial provides the UI. `devdeck-main-react-api-routes.json` at the repo root is an example export.
 
 ## Configuration (`DevDeck` section, see `DevDeckOptions`)
 
 Defaults: `DevelopmentOnly=true`, `AutoStartEnabledServices=false`, `StopTimeoutSeconds=10`,
 `DashboardPollingMilliseconds=1500`, `MaxLiveLogLinesPerService=5000`, `LogTrimAmount=1000`,
-`LogRetentionDays=14`. `ReverseProxy`: `Enabled=true`, `GatewayBaseUrl=http://localhost:5050`,
+`LogRetentionDays=14` (enforced by `LogRetentionService`), `StopServicesOnShutdown=false`.
+`ReverseProxy`: `Enabled=true`, `GatewayBaseUrl=http://localhost:5050` (a non-loopback host logs a startup
+warning — DevDeck has no authentication),
 `AllowExternalDestinations=false`, `AllowCatchAllRoutes=false`, `EnableAutoStartOnRequest=false`,
 `LogProxyRequests=true` (each proxied request writes a `PRX` inbound/outbound line pair into the
 target service's log stream via `ProxyRequestLogger`).
@@ -159,7 +167,7 @@ on Linux/WSL, `%LOCALAPPDATA%\DevDeck\` on Windows. Holds `devdeck.db` and `logs
 
 ```
 dotnet build                                                          # build the solution (DevDeck.slnx)
-dotnet test                                                           # run all unit tests (108)
+dotnet test                                                           # run all unit tests (167)
 dotnet run --project DevDeck.Web                                      # launch on http://localhost:5050
 dotnet ef migrations add <Name> --project DevDeck.Web -o Migrations   # new EF migration
 ```

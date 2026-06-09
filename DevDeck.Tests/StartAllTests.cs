@@ -204,6 +204,61 @@ public sealed class StartAllTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Exit_handler_persists_run_completion_and_clears_running_map()
+    {
+        var serviceId = await SeedRunnableServiceAsync(
+            "exit-handler-" + Guid.NewGuid().ToString("N"),
+            AppContext.BaseDirectory,
+            "Custom");
+        var manager = CreateManager();
+
+        var result = await manager.StartServiceAsync(serviceId, CancellationToken.None);
+        result.Success.Should().BeTrue();
+
+        // `dotnet --version` exits on its own; the Exited handler then (after its output
+        // drain delay) clears the running map and persists the run summary.
+        await WaitUntilAsync(async () =>
+        {
+            await using var db = _factory.CreateDbContext();
+            var run = await db.ServiceRuns.SingleAsync(r => r.Id == result.RunId!.Value);
+            return run.StoppedUtc is not null;
+        }, TimeSpan.FromSeconds(20));
+
+        manager.GetRunningProcess(serviceId).Should().BeNull();
+        await using var verifyDb = _factory.CreateDbContext();
+        var completed = await verifyDb.ServiceRuns.SingleAsync(r => r.Id == result.RunId!.Value);
+        completed.ExitCode.Should().Be(0);
+        completed.Status.Should().Be(ProcessStatusNames.Stopped);
+    }
+
+    [Fact]
+    public async Task Restart_of_a_stopped_service_starts_a_new_run()
+    {
+        var serviceId = await SeedRunnableServiceAsync(
+            "restart-" + Guid.NewGuid().ToString("N"),
+            AppContext.BaseDirectory,
+            "Custom");
+        var manager = CreateManager();
+
+        var result = await manager.RestartServiceAsync(serviceId, CancellationToken.None);
+
+        result.Success.Should().BeTrue();
+        result.NewRunId.Should().NotBeNull();
+        await WaitForProcessExitAsync(manager, serviceId);
+    }
+
+    private static async Task WaitUntilAsync(Func<Task<bool>> condition, TimeSpan timeout)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (await condition()) return;
+            await Task.Delay(100);
+        }
+        (await condition()).Should().BeTrue("the condition should hold before the timeout");
+    }
+
     private async Task<int> SeedServiceAsync(string name, int displayOrder, bool enabled)
     {
         await using var db = _factory.CreateDbContext();

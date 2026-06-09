@@ -22,11 +22,18 @@ public sealed class ServiceEditViewModel
     public string? StopCommand { get; set; }
     public string? StopArguments { get; set; }
     public string? Url { get; set; }
+
+    [Range(1, 65535, ErrorMessage = "Port must be between 1 and 65535.")]
     public int? Port { get; set; }
+
     public bool Enabled { get; set; } = true;
     public bool AutoStart { get; set; } = false;
     public bool UseExternalInstance { get; set; } = false;
+
+    [Range(1, 65535, ErrorMessage = "External port must be between 1 and 65535.")]
     public int? ExternalPort { get; set; }
+
+    [Range(0, int.MaxValue, ErrorMessage = "Display order must be 0 or greater.")]
     public int DisplayOrder { get; set; } = 0;
 
     public List<EnvVarEditRow> EnvironmentVariables { get; set; } = new();
@@ -48,8 +55,13 @@ public sealed class HealthCheckEditRow
 {
     public int Id { get; set; }
     public string Url { get; set; } = string.Empty;
+
+    [Range(100, 599, ErrorMessage = "Expected status code must be a valid HTTP status (100–599).")]
     public int ExpectedStatusCode { get; set; } = 200;
+
+    [Range(1, 86400, ErrorMessage = "Interval must be between 1 second and 1 day.")]
     public int IntervalSeconds { get; set; } = 10;
+
     public bool Enabled { get; set; } = true;
     public bool Delete { get; set; }
 }

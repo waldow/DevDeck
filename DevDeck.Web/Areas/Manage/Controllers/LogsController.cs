@@ -61,20 +61,31 @@ public sealed class LogsController : Controller
     {
         await using var db = await _dbFactory.CreateDbContextAsync();
         var run = await db.ServiceRuns.FirstOrDefaultAsync(r => r.Id == runId);
-        if (run is null || string.IsNullOrEmpty(run.LogFilePath) || !System.IO.File.Exists(run.LogFilePath))
+        if (run is null || string.IsNullOrEmpty(run.LogFilePath))
         {
             return NotFound();
         }
+
+        // LogFilePath is system-written, but clamp it to the logs folder anyway so a
+        // tampered database row can never read an arbitrary file off disk.
+        var fullPath = Path.GetFullPath(run.LogFilePath);
+        var relative = Path.GetRelativePath(DevDeckPaths.LogsFolder, fullPath);
+        if (relative.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(relative) ||
+            !System.IO.File.Exists(fullPath))
+        {
+            return NotFound();
+        }
+
         // Open with FileShare.ReadWrite so a still-running service (whose LogFileWriter holds
         // an open FileAccess.Write handle) doesn't cause a sharing violation. The framework
         // disposes the returned stream after streaming it to the response.
         var stream = new FileStream(
-            run.LogFilePath,
+            fullPath,
             FileMode.Open,
             FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete,
             bufferSize: 4096,
             useAsync: true);
-        return File(stream, "text/plain", Path.GetFileName(run.LogFilePath));
+        return File(stream, "text/plain", Path.GetFileName(fullPath));
     }
 }

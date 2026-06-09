@@ -32,6 +32,8 @@ public sealed class ProxyRouteEditViewModel
     public bool PreserveHostHeader { get; set; } = false;
     public bool AutoStartService { get; set; } = false;
     public bool RequireHealthyDestination { get; set; } = false;
+
+    [Range(1, 600, ErrorMessage = "Timeout must be between 1 and 600 seconds.")]
     public int? TimeoutSeconds { get; set; }
     public string? AuthorizationPolicy { get; set; }
     public bool ShowOnDashboard { get; set; } = true;

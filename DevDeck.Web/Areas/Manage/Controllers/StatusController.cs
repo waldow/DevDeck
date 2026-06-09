@@ -24,9 +24,10 @@ public sealed class StatusController : Controller
     [HttpGet("Snapshot")]
     public async Task<IActionResult> Snapshot(CancellationToken cancellationToken)
     {
+        // Polled every DashboardPollingMilliseconds — read-only, so skip change tracking.
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
-        var services = await db.DevServices.OrderBy(s => s.DisplayOrder).ToListAsync(cancellationToken);
-        var healthChecks = await db.ServiceHealthChecks.ToListAsync(cancellationToken);
+        var services = await db.DevServices.AsNoTracking().OrderBy(s => s.DisplayOrder).ToListAsync(cancellationToken);
+        var healthChecks = await db.ServiceHealthChecks.AsNoTracking().ToListAsync(cancellationToken);
 
         // Passthru services have no DevDeck-managed process, so a one-shot TCP probe of the
         // external port is the only way to tell whether the instance is up. Probe in parallel.

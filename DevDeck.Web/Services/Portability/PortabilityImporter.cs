@@ -2,18 +2,38 @@ using System.Text.Json;
 using DevDeck.Web.Areas.Manage.ViewModels;
 using DevDeck.Web.Data;
 using DevDeck.Web.Data.Entities;
+using DevDeck.Web.Options;
+using DevDeck.Web.Services.Proxy;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace DevDeck.Web.Services.Portability;
 
 public sealed class PortabilityImporter
 {
     private readonly IDbContextFactory<DevDeckDbContext> _dbFactory;
+    private readonly ProxyDestinationValidator _destinationValidator;
+    private readonly IOptionsMonitor<DevDeckOptions>? _options;
 
+    public PortabilityImporter(
+        IDbContextFactory<DevDeckDbContext> dbFactory,
+        ProxyDestinationValidator destinationValidator,
+        IOptionsMonitor<DevDeckOptions> options)
+    {
+        _dbFactory = dbFactory;
+        _destinationValidator = destinationValidator;
+        _options = options;
+    }
+
+    /// <summary>Test convenience: localhost-only destinations, catch-all routes disabled.</summary>
     public PortabilityImporter(IDbContextFactory<DevDeckDbContext> dbFactory)
     {
         _dbFactory = dbFactory;
+        _destinationValidator = new ProxyDestinationValidator(allowExternal: false);
+        _options = null;
     }
+
+    private bool AllowCatchAllRoutes => _options?.CurrentValue.ReverseProxy.AllowCatchAllRoutes ?? false;
 
     public async Task<PortabilityImportResult> ImportServicesAsync(string json, CancellationToken cancellationToken = default)
     {
@@ -62,7 +82,7 @@ public sealed class PortabilityImporter
             }
         }
 
-        await db.SaveChangesAsync(cancellationToken);
+        await SaveAsync(db, result, cancellationToken);
         return result;
     }
 
@@ -113,7 +133,7 @@ public sealed class PortabilityImporter
             ReconcileProfileServices(entity, p, servicesByName, result);
         }
 
-        await db.SaveChangesAsync(cancellationToken);
+        await SaveAsync(db, result, cancellationToken);
         return result;
     }
 
@@ -134,6 +154,28 @@ public sealed class PortabilityImporter
                 result.Errors.Add("Skipped a route with an empty name.");
                 result.Skipped++;
                 continue;
+            }
+
+            // Mirror the checks the route editor applies. ProxyRouteBuilder would silently
+            // skip violating rows when the YARP snapshot is built, so without this an import
+            // plants routes that look configured but never work — or worse, reserved-path
+            // and external-destination rows that only stay harmless as long as the builder
+            // keeps re-checking them.
+            if (ReservedPaths.IsReserved(r.MatchPath, out var reservedReason, AllowCatchAllRoutes))
+            {
+                result.Errors.Add($"Skipped route '{r.Name}': {reservedReason}");
+                result.Skipped++;
+                continue;
+            }
+            if (!string.IsNullOrWhiteSpace(r.DestinationUrlOverride))
+            {
+                var destination = _destinationValidator.Validate(r.DestinationUrlOverride);
+                if (!destination.IsValid)
+                {
+                    result.Errors.Add($"Skipped route '{r.Name}': {destination.Error}");
+                    result.Skipped++;
+                    continue;
+                }
             }
 
             int? devServiceId = null;
@@ -170,8 +212,24 @@ public sealed class PortabilityImporter
             }
         }
 
-        await db.SaveChangesAsync(cancellationToken);
+        await SaveAsync(db, result, cancellationToken);
         return result;
+    }
+
+    private static async Task SaveAsync(DevDeckDbContext db, PortabilityImportResult result, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException ex)
+        {
+            // SaveChanges is transactional, so nothing was applied — reset the counters
+            // so the flash message doesn't claim a success that never landed.
+            result.Errors.Add($"Import failed to save: {ex.GetBaseException().Message}");
+            result.Created = 0;
+            result.Updated = 0;
+        }
     }
 
     private static void ApplyServiceScalars(DevService entity, PortableService s)

@@ -28,9 +28,9 @@ public sealed class DashboardController : Controller
     public async Task<IActionResult> Index()
     {
         await using var db = await _dbFactory.CreateDbContextAsync();
-        var services = await db.DevServices.OrderBy(s => s.DisplayOrder).ThenBy(s => s.Name).ToListAsync();
-        var healthChecks = await db.ServiceHealthChecks.ToListAsync();
-        var proxies = await db.ProxyRoutes.Where(r => r.Enabled && r.ShowOnDashboard).ToListAsync();
+        var services = await db.DevServices.AsNoTracking().OrderBy(s => s.DisplayOrder).ThenBy(s => s.Name).ToListAsync();
+        var healthChecks = await db.ServiceHealthChecks.AsNoTracking().ToListAsync();
+        var proxies = await db.ProxyRoutes.AsNoTracking().Where(r => r.Enabled && r.ShowOnDashboard).ToListAsync();
 
         var gateway = _options.Value.ReverseProxy.GatewayBaseUrl.TrimEnd('/');
 

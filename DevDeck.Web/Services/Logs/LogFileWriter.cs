@@ -1,28 +1,44 @@
-using System.Collections.Concurrent;
 using System.Text;
 
 namespace DevDeck.Web.Services.Logs;
 
 public sealed class LogFileWriter : IAsyncDisposable
 {
-    private readonly ConcurrentDictionary<string, StreamWriter> _writers = new();
+    private readonly Dictionary<string, StreamWriter> _writers = new();
     private readonly object _lock = new();
+    private bool _disposed;
 
     public void Append(string filePath, LogLine line)
     {
-        var writer = _writers.GetOrAdd(filePath, OpenWriter);
-        lock (writer)
+        // Appends arrive on process-output threadpool threads, where any escaping
+        // exception is unhandled and kills the host. Serialize against Close/Dispose
+        // (so we never write to a just-disposed writer) and swallow I/O failures —
+        // the in-memory ring buffer still holds the line.
+        lock (_lock)
         {
-            writer.WriteLine(line.Format());
-            writer.Flush();
+            if (_disposed) return;
+            try
+            {
+                if (!_writers.TryGetValue(filePath, out var writer))
+                {
+                    writer = OpenWriter(filePath);
+                    _writers[filePath] = writer;
+                }
+                writer.WriteLine(line.Format());
+                writer.Flush();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException)
+            {
+                // best-effort
+            }
         }
     }
 
     public void Close(string filePath)
     {
-        if (_writers.TryRemove(filePath, out var writer))
+        lock (_lock)
         {
-            lock (writer)
+            if (_writers.Remove(filePath, out var writer))
             {
                 try { writer.Flush(); writer.Dispose(); }
                 catch { /* best-effort */ }
@@ -30,21 +46,26 @@ public sealed class LogFileWriter : IAsyncDisposable
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        foreach (var kvp in _writers)
+        lock (_lock)
         {
-            try
+            _disposed = true;
+            foreach (var writer in _writers.Values)
             {
-                await kvp.Value.FlushAsync();
-                kvp.Value.Dispose();
+                try
+                {
+                    writer.Flush();
+                    writer.Dispose();
+                }
+                catch
+                {
+                    // best-effort
+                }
             }
-            catch
-            {
-                // best-effort
-            }
+            _writers.Clear();
         }
-        _writers.Clear();
+        return ValueTask.CompletedTask;
     }
 
     private static StreamWriter OpenWriter(string filePath)

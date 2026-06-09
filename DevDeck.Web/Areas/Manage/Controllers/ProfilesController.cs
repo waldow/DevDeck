@@ -59,6 +59,7 @@ public sealed class ProfilesController : Controller
         {
             ModelState.AddModelError(nameof(model.Name), "A profile with this name already exists.");
         }
+        await ValidateIncludedServicesExistAsync(db, model);
         if (!ModelState.IsValid)
         {
             await PopulateAvailableServicesAsync(model);
@@ -134,6 +135,7 @@ public sealed class ProfilesController : Controller
         {
             ModelState.AddModelError(nameof(model.Name), "A profile with this name already exists.");
         }
+        await ValidateIncludedServicesExistAsync(db, model);
         if (!ModelState.IsValid)
         {
             await PopulateAvailableServicesAsync(model);
@@ -258,6 +260,24 @@ public sealed class ProfilesController : Controller
             clean.Append(char.IsLetterOrDigit(ch) ? ch : '-');
         }
         return clean.ToString().Trim('-');
+    }
+
+    // The service list in the form is a snapshot; a service deleted between form load and
+    // submit would otherwise become a LaunchProfileService row with a dangling FK.
+    private async Task ValidateIncludedServicesExistAsync(DevDeckDbContext db, ProfileEditViewModel model)
+    {
+        var includedIds = model.Services.Where(r => r.Include).Select(r => r.DevServiceId).Distinct().ToList();
+        if (includedIds.Count == 0) return;
+
+        var existingIds = await db.DevServices
+            .Where(s => includedIds.Contains(s.Id))
+            .Select(s => s.Id)
+            .ToListAsync();
+        if (existingIds.Count != includedIds.Count)
+        {
+            ModelState.AddModelError(string.Empty,
+                "One or more selected services no longer exist. Reload the page and try again.");
+        }
     }
 
     private async Task PopulateAvailableServicesAsync(ProfileEditViewModel vm)

@@ -113,6 +113,7 @@ public sealed class ServicesController : Controller
     public async Task<IActionResult> Create(ServiceEditViewModel model)
     {
         ViewBag.Presets = _presets.All();
+        ValidateServiceModel(model);
         if (!ModelState.IsValid)
         {
             return View("Edit", model);
@@ -214,6 +215,7 @@ public sealed class ServicesController : Controller
     public async Task<IActionResult> Edit(int id, ServiceEditViewModel model)
     {
         ViewBag.Presets = _presets.All();
+        ValidateServiceModel(model);
         if (!ModelState.IsValid)
         {
             return View(model);
@@ -491,6 +493,29 @@ public sealed class ServicesController : Controller
         }
         return RedirectToAction("Index", "Dashboard");
     }
+
+    // Server-side checks beyond the data annotations: things that fail later (at process
+    // launch) with a much worse error message if they get into the database.
+    private void ValidateServiceModel(ServiceEditViewModel model)
+    {
+        if (!string.IsNullOrWhiteSpace(model.WorkingDirectory) && !Directory.Exists(model.WorkingDirectory))
+        {
+            ModelState.AddModelError(nameof(model.WorkingDirectory),
+                $"Directory does not exist on this machine: {model.WorkingDirectory}");
+        }
+
+        foreach (var row in model.EnvironmentVariables.Where(r => !r.Delete && !string.IsNullOrWhiteSpace(r.Key)))
+        {
+            if (!IsValidEnvVarKey(row.Key))
+            {
+                ModelState.AddModelError(nameof(model.EnvironmentVariables),
+                    $"'{row.Key}' is not a valid environment variable name (no '=', whitespace, or control characters).");
+            }
+        }
+    }
+
+    private static bool IsValidEnvVarKey(string key) =>
+        key.Length > 0 && !key.Contains('=') && !key.Any(c => char.IsWhiteSpace(c) || char.IsControl(c));
 
     private static void ApplyChildren(DevService entity, ServiceEditViewModel model)
     {

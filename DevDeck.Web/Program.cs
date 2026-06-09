@@ -12,7 +12,8 @@ using Yarp.ReverseProxy.Configuration;
 var builder = WebApplication.CreateBuilder(args);
 
 // Kestrel binding — DevDeck gateway listens on the configured gateway URL.
-builder.WebHost.UseUrls(GatewayUrlResolver.ResolveListenUrl(builder.Configuration));
+var listenUrl = GatewayUrlResolver.ResolveListenUrl(builder.Configuration);
+builder.WebHost.UseUrls(listenUrl);
 
 builder.Services.Configure<DevDeckOptions>(builder.Configuration.GetSection(DevDeckOptions.SectionName));
 
@@ -44,19 +45,38 @@ builder.Services.AddSingleton<PortabilityExporter>();
 builder.Services.AddSingleton<PortabilityImporter>();
 builder.Services.AddHostedService<HealthCheckBackgroundService>();
 builder.Services.AddHostedService<AutoStartHostedService>();
+builder.Services.AddHostedService<StopServicesOnShutdownHostedService>();
+builder.Services.AddHostedService<LogRetentionService>();
 
 builder.Services.AddReverseProxy();
 
 var app = builder.Build();
 
-using (var scope = app.Services.CreateScope())
+if (!GatewayUrlResolver.IsLoopbackHost(listenUrl))
 {
+    app.Logger.LogWarning(
+        "DevDeck is binding to {ListenUrl}, which is reachable from other machines. " +
+        "DevDeck has no authentication — prefer a localhost gateway URL.",
+        listenUrl);
+}
+
+try
+{
+    using var scope = app.Services.CreateScope();
     var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DevDeckDbContext>>();
     await using var db = await dbFactory.CreateDbContextAsync();
     await db.Database.MigrateAsync();
 
     var proxyProvider = scope.ServiceProvider.GetRequiredService<DevDeckProxyConfigProvider>();
     await proxyProvider.ReloadAsync();
+}
+catch (Exception ex)
+{
+    app.Logger.LogCritical(ex,
+        "DevDeck failed to initialize its database at {DatabaseFile}. " +
+        "Fix the file's permissions or delete it (configuration will be lost) and restart.",
+        DevDeckPaths.DatabaseFile);
+    throw;
 }
 
 app.UseStaticFiles();
@@ -156,4 +176,41 @@ internal sealed class AutoStartHostedService : IHostedService
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+}
+
+// Opt-in (DevDeck:StopServicesOnShutdown): stop all managed services when DevDeck shuts
+// down. Default keeps today's behavior — children keep running and are reconciled as
+// orphaned runs on the next start.
+internal sealed class StopServicesOnShutdownHostedService : IHostedService
+{
+    private readonly IDevDeckProcessManager _manager;
+    private readonly Microsoft.Extensions.Options.IOptions<DevDeckOptions> _options;
+    private readonly ILogger<StopServicesOnShutdownHostedService> _logger;
+
+    public StopServicesOnShutdownHostedService(
+        IDevDeckProcessManager manager,
+        Microsoft.Extensions.Options.IOptions<DevDeckOptions> options,
+        ILogger<StopServicesOnShutdownHostedService> logger)
+    {
+        _manager = manager;
+        _options = options;
+        _logger = logger;
+    }
+
+    public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        if (!_options.Value.StopServicesOnShutdown) return;
+
+        try
+        {
+            var result = await _manager.StopAllAsync(cancellationToken);
+            _logger.LogInformation("Stopped {Count} managed services on shutdown", result.Stopped);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to stop managed services on shutdown");
+        }
+    }
 }

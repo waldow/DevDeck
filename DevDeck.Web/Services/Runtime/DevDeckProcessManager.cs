@@ -12,7 +12,7 @@ using Microsoft.Extensions.Options;
 
 namespace DevDeck.Web.Services.Runtime;
 
-public sealed class DevDeckProcessManager : IDevDeckProcessManager
+public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
 {
     private readonly ConcurrentDictionary<int, RunningProcessInfo> _running = new();
     private readonly ConcurrentDictionary<int, SemaphoreSlim> _serviceLocks = new();
@@ -83,6 +83,18 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
         var serviceLock = _serviceLocks.GetOrAdd(serviceId, _ => new SemaphoreSlim(1, 1));
         await serviceLock.WaitAsync(cancellationToken);
         try
+        {
+            return await StartServiceCoreAsync(serviceId, cancellationToken);
+        }
+        finally
+        {
+            serviceLock.Release();
+        }
+    }
+
+    // Callers must hold the per-service lock.
+    private async Task<StartServiceResult> StartServiceCoreAsync(int serviceId, CancellationToken cancellationToken)
+    {
         {
             if (_running.ContainsKey(serviceId))
             {
@@ -176,11 +188,10 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
             var runIdLocal = run.Id;
             var logPathLocal = logPath;
 
-            Process process;
+            var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
             RunningProcessInfo info;
             try
             {
-                process = new Process { StartInfo = psi, EnableRaisingEvents = true };
                 process.OutputDataReceived += (_, e) =>
                 {
                     if (e.Data is null) return;
@@ -193,7 +204,16 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
                 };
                 process.Exited += async (_, _) =>
                 {
-                    await HandleProcessExitedAsync(serviceIdLocal, runIdLocal, logPathLocal, process);
+                    // async void event handler: an escaping exception is unhandled and
+                    // would take down the whole host, so nothing may run outside this try.
+                    try
+                    {
+                        await HandleProcessExitedAsync(serviceIdLocal, runIdLocal, logPathLocal, process);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Failed to finalize exited service {ServiceId}", serviceIdLocal);
+                    }
                 };
 
                 info = new RunningProcessInfo
@@ -210,6 +230,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
                 };
                 if (!_running.TryAdd(service.Id, info))
                 {
+                    process.Dispose();
                     return new StartServiceResult { ServiceId = service.Id, RunId = run.Id, Success = false, Error = "Service is already running." };
                 }
 
@@ -220,6 +241,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
             catch (Exception ex)
             {
                 _running.TryRemove(service.Id, out _);
+                process.Dispose();
                 run.Status = ProcessStatusNames.FailedToStart;
                 run.StoppedUtc = DateTimeOffset.UtcNow;
                 run.LastError = ex.Message;
@@ -261,10 +283,6 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
                 Message = $"Started PID {run.ProcessId}",
             };
         }
-        finally
-        {
-            serviceLock.Release();
-        }
     }
 
     public async Task<StopServiceResult> StopServiceAsync(int serviceId, CancellationToken cancellationToken)
@@ -278,55 +296,99 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
         await serviceLock.WaitAsync(cancellationToken);
         try
         {
-            if (!_running.TryGetValue(serviceId, out var info))
+            return await StopServiceCoreAsync(serviceId, cancellationToken);
+        }
+        finally
+        {
+            serviceLock.Release();
+        }
+    }
+
+    // Callers must hold the per-service lock. The Exited handler disposes the Process
+    // object concurrently, so every touch goes through the Safe* helpers.
+    private async Task<StopServiceResult> StopServiceCoreAsync(int serviceId, CancellationToken cancellationToken)
+    {
+        if (!_running.TryGetValue(serviceId, out var info))
+        {
+            return await StopOrphanedServiceRunAsync(serviceId, cancellationToken);
+        }
+
+        info.Status = ProcessStatus.Stopping;
+        AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, "Stop requested");
+        await MarkRunStatusAsync(info.ServiceRunId, ProcessStatusNames.Stopping, cancellationToken);
+
+        var timeout = TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.StopTimeoutSeconds));
+        var exited = false;
+        try
+        {
+            // Once a stop is underway it must run to completion (including the kill
+            // fallback) even if the HTTP request that triggered it is aborted — otherwise
+            // an aborted Stop-all would leave a live process pinned at "Stopping" forever.
+            // So the process waits below use CancellationToken.None and rely on timeouts.
+            if (!SafeHasExited(info.Process))
             {
-                return await StopOrphanedServiceRunAsync(serviceId, cancellationToken);
+                var signalled = TrySendGracefulShutdown(info.Process, serviceId, info.ServiceRunId, info.LogFilePath);
+                if (signalled)
+                {
+                    exited = await WaitForExitAsync(info.Process, timeout, CancellationToken.None);
+                }
+            }
+            else
+            {
+                exited = true;
             }
 
-            info.Status = ProcessStatus.Stopping;
-            AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, "Stop requested");
-            await MarkRunStatusAsync(info.ServiceRunId, ProcessStatusNames.Stopping, cancellationToken);
-
-            var timeout = TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.StopTimeoutSeconds));
-            var exited = false;
-            try
+            if (!exited && !SafeHasExited(info.Process))
             {
-                // Once a stop is underway it must run to completion (including the kill
-                // fallback) even if the HTTP request that triggered it is aborted — otherwise
-                // an aborted Stop-all would leave a live process pinned at "Stopping" forever.
-                // So the process waits below use CancellationToken.None and rely on timeouts.
-                if (!info.Process.HasExited)
-                {
-                    var signalled = TrySendGracefulShutdown(info.Process, serviceId, info.ServiceRunId, info.LogFilePath);
-                    if (signalled)
-                    {
-                        exited = await WaitForExitAsync(info.Process, timeout, CancellationToken.None);
-                    }
-                }
-                else
-                {
-                    exited = true;
-                }
-
-                if (!exited && !info.Process.HasExited)
-                {
-                    info.KillIssued = true;
-                    AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, "Killing process tree");
-                    info.Process.Kill(entireProcessTree: true);
-                    exited = await WaitForExitAsync(info.Process, TimeSpan.FromSeconds(5), CancellationToken.None);
-                }
+                info.KillIssued = true;
+                AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, "Killing process tree");
+                info.Process.Kill(entireProcessTree: true);
+                exited = await WaitForExitAsync(info.Process, TimeSpan.FromSeconds(5), CancellationToken.None);
             }
-            catch (Exception ex)
+        }
+        catch (Exception ex)
+        {
+            AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, $"Error stopping process: {ex.Message}");
+        }
+
+        var stopped = exited || SafeHasExited(info.Process);
+        return new StopServiceResult
+        {
+            ServiceId = serviceId,
+            RunId = info.ServiceRunId,
+            Success = stopped,
+            Message = stopped ? "Stopped" : "Timed out waiting for exit",
+        };
+    }
+
+    public async Task<RestartServiceResult> RestartServiceAsync(int serviceId, CancellationToken cancellationToken)
+    {
+        if (!ExecutionAllowed())
+        {
+            return new RestartServiceResult { ServiceId = serviceId, Success = false, Error = "DevDeck service execution is only enabled in Development." };
+        }
+
+        // Hold the per-service lock across the whole stop→start sequence so a concurrent
+        // start/stop can't interleave between the two halves of the restart.
+        var serviceLock = _serviceLocks.GetOrAdd(serviceId, _ => new SemaphoreSlim(1, 1));
+        await serviceLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_running.ContainsKey(serviceId))
             {
-                AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, $"Error stopping process: {ex.Message}");
+                await StopServiceCoreAsync(serviceId, cancellationToken);
+                // The Exited handler clears the running map asynchronously after the process
+                // dies; wait for it so the start below doesn't see a stale "already running".
+                await WaitForRunningRemovalAsync(serviceId, TimeSpan.FromSeconds(5), cancellationToken);
             }
-
-            return new StopServiceResult
+            var start = await StartServiceCoreAsync(serviceId, cancellationToken);
+            return new RestartServiceResult
             {
                 ServiceId = serviceId,
-                RunId = info.ServiceRunId,
-                Success = exited || info.Process.HasExited,
-                Message = exited || info.Process.HasExited ? "Stopped" : "Timed out waiting for exit",
+                NewRunId = start.RunId,
+                Success = start.Success,
+                Message = start.Message,
+                Error = start.Error,
             };
         }
         finally
@@ -335,22 +397,13 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
         }
     }
 
-    public async Task<RestartServiceResult> RestartServiceAsync(int serviceId, CancellationToken cancellationToken)
+    private async Task WaitForRunningRemovalAsync(int serviceId, TimeSpan timeout, CancellationToken cancellationToken)
     {
-        if (_running.ContainsKey(serviceId))
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (_running.ContainsKey(serviceId) && DateTimeOffset.UtcNow < deadline)
         {
-            await StopServiceAsync(serviceId, cancellationToken);
-            await Task.Delay(250, cancellationToken);
+            await Task.Delay(50, cancellationToken);
         }
-        var start = await StartServiceAsync(serviceId, cancellationToken);
-        return new RestartServiceResult
-        {
-            ServiceId = serviceId,
-            NewRunId = start.RunId,
-            Success = start.Success,
-            Message = start.Message,
-            Error = start.Error,
-        };
     }
 
     public async Task<StartProfileResult> StartProfileAsync(int profileId, CancellationToken cancellationToken)
@@ -571,26 +624,37 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
     {
         int? exitCode = null;
         try { exitCode = process.ExitCode; } catch { /* ignore */ }
-        AppendSystemLine(serviceId, runId, logPath, $"Process exited with code {exitCode?.ToString() ?? "?"}");
         _running.TryRemove(serviceId, out var info);
         _healthStatusCache.RemoveService(serviceId);
+
+        // Let the async stdout/stderr readers deliver buffered tail lines before the log
+        // file is closed and the handle released. Don't block on a full WaitForExit()
+        // drain — a grandchild holding the inherited pipe open would stall this forever.
+        await Task.Delay(TimeSpan.FromSeconds(1));
+
+        AppendSystemLine(serviceId, runId, logPath, $"Process exited with code {exitCode?.ToString() ?? "?"}");
         _logFileWriter.Close(logPath);
 
         try
         {
             await using var db = await _dbFactory.CreateDbContextAsync();
             var run = await db.ServiceRuns.FirstOrDefaultAsync(r => r.Id == runId);
-            if (run is null) return;
-
-            run.StoppedUtc = DateTimeOffset.UtcNow;
-            run.ExitCode = exitCode;
-            run.Status = ProcessStatusNames.ResolveExitStatus(run.Status, exitCode, info?.KillIssued == true);
-            await db.SaveChangesAsync();
+            if (run is not null)
+            {
+                run.StoppedUtc = DateTimeOffset.UtcNow;
+                run.ExitCode = exitCode;
+                run.Status = ProcessStatusNames.ResolveExitStatus(run.Status, exitCode, info?.KillIssued == true);
+                await db.SaveChangesAsync();
+            }
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to update ServiceRun {RunId} on exit", runId);
         }
+
+        // Release the OS handle; every other reader of this Process goes through the
+        // Safe* helpers, which treat a disposed process as exited.
+        try { process.Dispose(); } catch { /* best-effort */ }
     }
 
     private static int? SafePid(Process p)
@@ -733,5 +797,23 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager
         {
             return true;
         }
+    }
+
+    // Container disposal at host shutdown: release process handles and locks. This does
+    // NOT stop the child processes — that is StopServicesOnShutdownHostedService's job,
+    // and only when DevDeck:StopServicesOnShutdown opts in.
+    public void Dispose()
+    {
+        foreach (var info in _running.Values)
+        {
+            try { info.Process.Dispose(); } catch { /* best-effort */ }
+        }
+        _running.Clear();
+
+        foreach (var serviceLock in _serviceLocks.Values)
+        {
+            try { serviceLock.Dispose(); } catch { /* best-effort */ }
+        }
+        _serviceLocks.Clear();
     }
 }

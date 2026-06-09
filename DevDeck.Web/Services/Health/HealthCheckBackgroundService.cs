@@ -1,4 +1,5 @@
 using DevDeck.Web.Data;
+using DevDeck.Web.Data.Entities;
 using DevDeck.Web.Services.Commands;
 using DevDeck.Web.Services.Runtime;
 using Microsoft.EntityFrameworkCore;
@@ -67,69 +68,67 @@ public sealed class HealthCheckBackgroundService : BackgroundService
         client.Timeout = TimeSpan.FromSeconds(3);
         var now = DateTimeOffset.UtcNow;
 
-        foreach (var check in checks)
-        {
-            if (check.LastCheckedUtc is not null &&
-                now - check.LastCheckedUtc < TimeSpan.FromSeconds(check.IntervalSeconds) &&
-                !string.Equals(check.LastStatus, HealthStatusNames.NotRunning, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            var service = check.DevService;
-            check.LastCheckedUtc = now;
-
-            var url = _renderer.Render(
-                check.Url,
-                CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.EffectivePort, service.WorkingDirectory)).Text;
-
-            var running = _processManager.GetRunningProcess(service.Id);
-            var externalEndpointUp = running is null && await IsEndpointOpenAsync(url, token);
-            if (running is null && !externalEndpointUp)
-            {
-                check.LastStatus = HealthStatusNames.NotRunning;
-                check.LastStatusCode = null;
-                check.LastError = null;
-                _healthStatusCache.Set(service.Id, check.Id, check.LastStatus);
-                continue;
-            }
-
-            try
-            {
-                using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, token);
-                check.LastStatusCode = (int)response.StatusCode;
-                check.LastStatus = (int)response.StatusCode == check.ExpectedStatusCode
-                    ? HealthStatusNames.Healthy
-                    : HealthStatusNames.Unhealthy;
-                check.LastError = null;
-                _healthStatusCache.Set(service.Id, check.Id, check.LastStatus);
-            }
-            catch (TaskCanceledException)
-            {
-                check.LastStatus = HealthStatusNames.Timeout;
-                check.LastStatusCode = null;
-                check.LastError = "Timed out";
-                _healthStatusCache.Set(service.Id, check.Id, check.LastStatus);
-            }
-            catch (Exception ex)
-            {
-                check.LastStatus = HealthStatusNames.Unhealthy;
-                check.LastStatusCode = null;
-                check.LastError = ex.Message;
-                _healthStatusCache.Set(service.Id, check.Id, check.LastStatus);
-            }
-        }
+        // Checks run concurrently and each one is isolated: a slow or throwing check must
+        // neither push the pass past the polling interval nor lose the other checks'
+        // results. Each task mutates only its own tracked entity, so the single
+        // SaveChangesAsync below is safe.
+        await Task.WhenAll(checks.Where(c => IsDue(c, now)).Select(c => RunCheckAsync(c, client, now, token)));
 
         await db.SaveChangesAsync(token);
     }
 
-    private async Task<bool> IsEndpointOpenAsync(string url, CancellationToken cancellationToken)
-    {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
-        {
-            return false;
-        }
+    private static bool IsDue(ServiceHealthCheck check, DateTimeOffset now) =>
+        check.LastCheckedUtc is null ||
+        now - check.LastCheckedUtc >= TimeSpan.FromSeconds(Math.Max(1, check.IntervalSeconds)) ||
+        string.Equals(check.LastStatus, HealthStatusNames.NotRunning, StringComparison.OrdinalIgnoreCase);
 
-        return await _portProbe.IsEndpointOpenAsync(uri.Host, uri.Port, cancellationToken);
+    private async Task RunCheckAsync(ServiceHealthCheck check, HttpClient client, DateTimeOffset now, CancellationToken token)
+    {
+        var service = check.DevService;
+        check.LastCheckedUtc = now;
+
+        try
+        {
+            var url = _renderer.Render(
+                check.Url,
+                CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.EffectivePort, service.WorkingDirectory)).Text;
+
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            {
+                Record(check, HealthStatusNames.Unhealthy, null,
+                    $"Health check URL is not a valid absolute URL after rendering: '{url}'");
+                return;
+            }
+
+            var running = _processManager.GetRunningProcess(service.Id);
+            var externalEndpointUp = running is null && await _portProbe.IsEndpointOpenAsync(uri.Host, uri.Port, token);
+            if (running is null && !externalEndpointUp)
+            {
+                Record(check, HealthStatusNames.NotRunning, null, null);
+                return;
+            }
+
+            using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, token);
+            var status = (int)response.StatusCode == check.ExpectedStatusCode
+                ? HealthStatusNames.Healthy
+                : HealthStatusNames.Unhealthy;
+            Record(check, status, (int)response.StatusCode, null);
+        }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        {
+            Record(check, HealthStatusNames.Timeout, null, "Timed out");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Record(check, HealthStatusNames.Unhealthy, null, ex.Message);
+        }
+    }
+
+    private void Record(ServiceHealthCheck check, string status, int? statusCode, string? error)
+    {
+        check.LastStatus = status;
+        check.LastStatusCode = statusCode;
+        check.LastError = error;
+        _healthStatusCache.Set(check.DevServiceId, check.Id, status);
     }
 }

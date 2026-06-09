@@ -10,7 +10,10 @@ public sealed class DevDeckOptions
     public int DashboardPollingMilliseconds { get; set; } = 1500;
     public int MaxLiveLogLinesPerService { get; set; } = 5000;
     public int LogTrimAmount { get; set; } = 1000;
+    /// <summary>Run log files older than this are deleted by the retention sweep; 0 or negative keeps them forever.</summary>
     public int LogRetentionDays { get; set; } = 14;
+    /// <summary>When true, DevDeck stops all managed services on shutdown instead of leaving them running as orphans.</summary>
+    public bool StopServicesOnShutdown { get; set; } = false;
     public DevDeckReverseProxyOptions ReverseProxy { get; set; } = new();
     public AzuriteOptions Azurite { get; set; } = new();
 }

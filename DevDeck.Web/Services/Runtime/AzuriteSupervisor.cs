@@ -100,6 +100,7 @@ public sealed class AzuriteSupervisor : IAzuriteSupervisor, IAsyncDisposable
     private string? TryLaunch(AzuriteOptions opts, Action<string> log)
     {
         var executable = _resolver.ResolveForLaunch(opts.Command);
+        Process? process = null;
         try
         {
             Directory.CreateDirectory(Workspace);
@@ -124,19 +125,22 @@ public sealed class AzuriteSupervisor : IAzuriteSupervisor, IAsyncDisposable
             psi.ArgumentList.Add("--tablePort");
             psi.ArgumentList.Add(opts.TablePort.ToString());
 
-            var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+            process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+            var processLocal = process;
             process.OutputDataReceived += (_, e) => WriteAzuriteLog("OUT", e.Data);
             process.ErrorDataReceived += (_, e) => WriteAzuriteLog("ERR", e.Data);
             process.Exited += (_, _) =>
             {
                 _logFileWriter.Close(LogFile);
-                if (ReferenceEquals(_process, process))
+                if (ReferenceEquals(_process, processLocal))
                 {
                     _process = null;
                 }
             };
 
             process.Start();
+            // Track immediately after Start so a BeginOutputReadLine failure below can't
+            // leave a live Azurite running untracked (DisposeAsync would never reach it).
             _process = process;
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
@@ -146,6 +150,12 @@ public sealed class AzuriteSupervisor : IAzuriteSupervisor, IAsyncDisposable
         }
         catch (Exception ex)
         {
+            // Only dispose the handle when the process never became tracked (Start failed);
+            // a tracked process stays under _process for the exit handler / DisposeAsync.
+            if (process is not null && !ReferenceEquals(_process, process))
+            {
+                try { process.Dispose(); } catch { /* best-effort */ }
+            }
             _logger.LogWarning(ex, "Failed to launch Azurite via '{Command}'", opts.Command);
             return $"Could not launch Azurite ('{opts.Command}'): {ex.Message}. Install it with 'npm install -g azurite'.";
         }
