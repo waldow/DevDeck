@@ -33,7 +33,7 @@ public sealed class LogRetentionService : BackgroundService
             var retentionDays = _options.CurrentValue.LogRetentionDays;
             if (retentionDays > 0)
             {
-                var deleted = SweepFolder(DevDeckPaths.LogsFolder, DateTime.UtcNow.AddDays(-retentionDays), _logger);
+                var deleted = SweepFolder(DevDeckPaths.LogsFolder, CutoffUtc(DateTime.UtcNow, retentionDays), _logger);
                 if (deleted > 0)
                 {
                     _logger.LogInformation(
@@ -46,6 +46,13 @@ public sealed class LogRetentionService : BackgroundService
             catch (TaskCanceledException) { return; }
         }
     }
+
+    // A retention window reaching back past DateTime.MinValue would throw (and an exception
+    // escaping ExecuteAsync stops the host); clamp it so it simply means "keep everything".
+    public static DateTime CutoffUtc(DateTime nowUtc, int retentionDays) =>
+        retentionDays >= (nowUtc - DateTime.MinValue).TotalDays
+            ? DateTime.MinValue
+            : nowUtc.AddDays(-retentionDays);
 
     public static int SweepFolder(string folder, DateTime deleteOlderThanUtc, ILogger? logger = null)
     {

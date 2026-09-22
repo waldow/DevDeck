@@ -3,6 +3,7 @@ using DevDeck.Web.Areas.Manage.ViewModels;
 using DevDeck.Web.Data;
 using DevDeck.Web.Data.Entities;
 using DevDeck.Web.Options;
+using DevDeck.Web.Services.Commands;
 using DevDeck.Web.Services.Proxy;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -32,6 +33,8 @@ public sealed class PortabilityImporter
         _destinationValidator = new ProxyDestinationValidator(allowExternal: false);
         _options = null;
     }
+
+    private static readonly CommandTemplateRenderer Renderer = new();
 
     private bool AllowCatchAllRoutes => _options?.CurrentValue.ReverseProxy.AllowCatchAllRoutes ?? false;
 
@@ -145,7 +148,7 @@ public sealed class PortabilityImporter
 
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
         var existing = await db.ProxyRoutes.ToDictionaryAsync(r => r.Name, StringComparer.OrdinalIgnoreCase, cancellationToken);
-        var servicesByName = await db.DevServices.ToDictionaryAsync(s => s.Name, s => s.Id, StringComparer.OrdinalIgnoreCase, cancellationToken);
+        var servicesByName = await db.DevServices.ToDictionaryAsync(s => s.Name, StringComparer.OrdinalIgnoreCase, cancellationToken);
 
         foreach (var r in bundle.Routes)
         {
@@ -167,29 +170,22 @@ public sealed class PortabilityImporter
                 result.Skipped++;
                 continue;
             }
-            if (!string.IsNullOrWhiteSpace(r.DestinationUrlOverride))
+
+            DevService? service = null;
+            if (!string.IsNullOrWhiteSpace(r.ServiceName) && !servicesByName.TryGetValue(r.ServiceName, out service))
             {
-                var destination = _destinationValidator.Validate(r.DestinationUrlOverride);
-                if (!destination.IsValid)
-                {
-                    result.Errors.Add($"Skipped route '{r.Name}': {destination.Error}");
-                    result.Skipped++;
-                    continue;
-                }
+                result.Warnings.Add($"Route '{r.Name}' references service '{r.ServiceName}' which was not found; route imported without a linked service.");
             }
 
-            int? devServiceId = null;
-            if (!string.IsNullOrWhiteSpace(r.ServiceName))
+            var destinationError = ValidateRouteDestination(r.DestinationUrlOverride, service);
+            if (destinationError is not null)
             {
-                if (servicesByName.TryGetValue(r.ServiceName, out var id))
-                {
-                    devServiceId = id;
-                }
-                else
-                {
-                    result.Warnings.Add($"Route '{r.Name}' references service '{r.ServiceName}' which was not found; route imported without a linked service.");
-                }
+                result.Errors.Add($"Skipped route '{r.Name}': {destinationError}");
+                result.Skipped++;
+                continue;
             }
+
+            int? devServiceId = service?.Id;
 
             if (existing.TryGetValue(r.Name, out var entity))
             {
@@ -214,6 +210,30 @@ public sealed class PortabilityImporter
 
         await SaveAsync(db, result, cancellationToken);
         return result;
+    }
+
+    // Same rule as the route editor and ProxyRouteBuilder: the destination is the override,
+    // else the linked service's URL, with {port}/{id}/... rendered against that service
+    // before it is validated (a templated "http://localhost:{port}" is not a parseable URL).
+    private string? ValidateRouteDestination(string? destinationOverride, DevService? service)
+    {
+        var destination = !string.IsNullOrWhiteSpace(destinationOverride) ? destinationOverride.Trim() : service?.Url;
+        if (string.IsNullOrWhiteSpace(destination)) return null;
+
+        if (service is not null)
+        {
+            var rendered = Renderer.Render(
+                destination,
+                CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.EffectivePort, service.WorkingDirectory));
+            if (rendered.UnknownPlaceholders.Count > 0)
+            {
+                return $"Destination URL has unknown placeholder(s): {string.Join(", ", rendered.UnknownPlaceholders)}.";
+            }
+            destination = rendered.Text;
+        }
+
+        var validation = _destinationValidator.Validate(destination);
+        return validation.IsValid ? null : validation.Error;
     }
 
     private static async Task SaveAsync(DevDeckDbContext db, PortabilityImportResult result, CancellationToken cancellationToken)

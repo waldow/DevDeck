@@ -22,6 +22,24 @@ public sealed class LogRetentionServiceTests : IDisposable
         File.Exists(recent).Should().BeTrue();
     }
 
+    [Theory]
+    [InlineData(9_999_999)]
+    [InlineData(int.MaxValue)]
+    public void Cutoff_for_huge_retention_clamps_instead_of_throwing(int retentionDays)
+    {
+        var act = () => LogRetentionService.CutoffUtc(DateTime.UtcNow, retentionDays);
+
+        act.Should().NotThrow();
+        act().Should().Be(DateTime.MinValue);
+    }
+
+    [Fact]
+    public void Cutoff_subtracts_retention_days()
+    {
+        var now = new DateTime(2026, 9, 22, 0, 0, 0, DateTimeKind.Utc);
+        LogRetentionService.CutoffUtc(now, 14).Should().Be(now.AddDays(-14));
+    }
+
     [Fact]
     public void Sweep_ignores_non_log_files()
     {

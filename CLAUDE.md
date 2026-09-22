@@ -17,7 +17,7 @@ logs, watch health, and route `http://localhost:5050/app`, `/api`, … to the ri
 
 - `DevDeck.slnx` — solution. Two projects, both `net10.0`:
   - `DevDeck.Web` — the application (only deps: `Microsoft.EntityFrameworkCore.Sqlite`, `Yarp.ReverseProxy`).
-  - `DevDeck.Tests` — xUnit + FluentAssertions unit tests (currently **167**, all green).
+  - `DevDeck.Tests` — xUnit + FluentAssertions unit tests (currently **175**, all green).
 - `DevDeck_Specification_v2_Reverse_Proxy.md` — the original design spec. **Historical**: v1 is fully built,
   so this is no longer a build target. Its section numbers (e.g. §8 entities, §18 proxy) are still useful as
   rationale when a change touches a documented decision — cite them, but the code is the source of truth.
@@ -167,7 +167,7 @@ on Linux/WSL, `%LOCALAPPDATA%\DevDeck\` on Windows. Holds `devdeck.db` and `logs
 
 ```
 dotnet build                                                          # build the solution (DevDeck.slnx)
-dotnet test                                                           # run all unit tests (167)
+dotnet test                                                           # run all unit tests (175)
 dotnet run --project DevDeck.Web                                      # launch on http://localhost:5050
 dotnet ef migrations add <Name> --project DevDeck.Web -o Migrations   # new EF migration
 ```

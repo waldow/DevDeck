@@ -17,6 +17,15 @@ builder.WebHost.UseUrls(listenUrl);
 
 builder.Services.Configure<DevDeckOptions>(builder.Configuration.GetSection(DevDeckOptions.SectionName));
 
+// StopServicesOnShutdown stops services concurrently, each taking up to StopTimeoutSeconds
+// plus the 5s kill fallback and exit finalization; give the host long enough for that.
+var shutdownOptions = builder.Configuration.GetSection(DevDeckOptions.SectionName).Get<DevDeckOptions>() ?? new DevDeckOptions();
+if (shutdownOptions.StopServicesOnShutdown)
+{
+    builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(
+        Math.Max(o.ShutdownTimeout.TotalSeconds, Math.Max(1, shutdownOptions.StopTimeoutSeconds) + 15)));
+}
+
 builder.Services.AddControllersWithViews();
 builder.Services.AddAuthorization();
 builder.Services.AddHttpClient();

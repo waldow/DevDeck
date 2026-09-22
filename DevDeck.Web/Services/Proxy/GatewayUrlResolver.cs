@@ -1,4 +1,3 @@
-using System.Net;
 using DevDeck.Web.Options;
 
 namespace DevDeck.Web.Services.Proxy;
@@ -37,11 +36,7 @@ public static class GatewayUrlResolver
             return false;
         }
 
-        var host = uri.Host;
-        if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return true;
-        if (host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase)) return true;
-        if (IPAddress.TryParse(host.Trim('[', ']'), out var ip)) return IPAddress.IsLoopback(ip);
-        return false;
+        return ProxyDestinationValidator.IsLocalHost(uri.Host);
     }
 
     private static bool IsHttp(Uri uri) =>

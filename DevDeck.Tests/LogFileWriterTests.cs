@@ -41,6 +41,24 @@ public sealed class LogFileWriterTests : IDisposable
     }
 
     [Fact]
+    public async Task Append_after_final_close_does_not_reopen_the_file()
+    {
+        var writer = new LogFileWriter();
+        var path = Path.Combine(_temp.FullName, "run.log");
+
+        writer.Append(path, Line("before"));
+        writer.Close(path, allowReopen: false);
+        writer.Append(path, Line("late"));
+
+        // No handle is held: the file can be deleted straight away (it would be locked on Windows).
+        var content = await File.ReadAllTextAsync(path);
+        content.Should().Contain("before").And.NotContain("late");
+        File.Delete(path);
+        File.Exists(path).Should().BeFalse();
+        await writer.DisposeAsync();
+    }
+
+    [Fact]
     public async Task Append_after_dispose_is_a_noop()
     {
         var writer = new LogFileWriter();

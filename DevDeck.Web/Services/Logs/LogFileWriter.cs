@@ -4,7 +4,11 @@ namespace DevDeck.Web.Services.Logs;
 
 public sealed class LogFileWriter : IAsyncDisposable
 {
-    private readonly Dictionary<string, StreamWriter> _writers = new();
+    // The global lock only guards the maps; each file's writes serialize on their own
+    // entry so one chatty service's disk I/O doesn't stall every other writer (including
+    // the proxy request path, which logs PRX lines through here).
+    private readonly Dictionary<string, WriterEntry> _writers = new();
+    private readonly HashSet<string> _closed = new();
     private readonly object _lock = new();
     private bool _disposed;
 
@@ -14,58 +18,82 @@ public sealed class LogFileWriter : IAsyncDisposable
         // exception is unhandled and kills the host. Serialize against Close/Dispose
         // (so we never write to a just-disposed writer) and swallow I/O failures —
         // the in-memory ring buffer still holds the line.
-        lock (_lock)
+        WriterEntry? entry;
+        try
         {
-            if (_disposed) return;
-            try
+            lock (_lock)
             {
-                if (!_writers.TryGetValue(filePath, out var writer))
+                // A finished run log stays closed: late output (e.g. from a grandchild still
+                // holding the inherited pipe) must not reopen a handle nothing will release.
+                if (_disposed || _closed.Contains(filePath)) return;
+                if (!_writers.TryGetValue(filePath, out entry))
                 {
-                    writer = OpenWriter(filePath);
-                    _writers[filePath] = writer;
+                    entry = new WriterEntry(OpenWriter(filePath));
+                    _writers[filePath] = entry;
                 }
-                writer.WriteLine(line.Format());
-                writer.Flush();
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException)
+
+            lock (entry)
             {
-                // best-effort
+                if (entry.Disposed) return;
+                entry.Writer.WriteLine(line.Format());
+                entry.Writer.Flush();
             }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException)
+        {
+            // best-effort
         }
     }
 
-    public void Close(string filePath)
+    /// <summary>
+    /// Flushes and releases the file. By default a later Append reopens it (Azurite reuses
+    /// one log across relaunches); pass <paramref name="allowReopen"/> = false for a per-run
+    /// log that is finished for good, so late output can't reopen a handle nothing releases.
+    /// </summary>
+    public void Close(string filePath, bool allowReopen = true)
     {
+        WriterEntry? entry;
         lock (_lock)
         {
-            if (_writers.Remove(filePath, out var writer))
-            {
-                try { writer.Flush(); writer.Dispose(); }
-                catch { /* best-effort */ }
-            }
+            if (!allowReopen) _closed.Add(filePath);
+            if (!_writers.Remove(filePath, out entry)) return;
         }
+        DisposeEntry(entry);
     }
 
     public ValueTask DisposeAsync()
     {
+        WriterEntry[] entries;
         lock (_lock)
         {
             _disposed = true;
-            foreach (var writer in _writers.Values)
-            {
-                try
-                {
-                    writer.Flush();
-                    writer.Dispose();
-                }
-                catch
-                {
-                    // best-effort
-                }
-            }
+            entries = _writers.Values.ToArray();
             _writers.Clear();
         }
+        foreach (var entry in entries)
+        {
+            DisposeEntry(entry);
+        }
         return ValueTask.CompletedTask;
+    }
+
+    private static void DisposeEntry(WriterEntry entry)
+    {
+        lock (entry)
+        {
+            if (entry.Disposed) return;
+            entry.Disposed = true;
+            try
+            {
+                entry.Writer.Flush();
+                entry.Writer.Dispose();
+            }
+            catch
+            {
+                // best-effort
+            }
+        }
     }
 
     private static StreamWriter OpenWriter(string filePath)
@@ -81,5 +109,11 @@ public sealed class LogFileWriter : IAsyncDisposable
             NewLine = "\n",
             AutoFlush = false,
         };
+    }
+
+    private sealed class WriterEntry(StreamWriter writer)
+    {
+        public StreamWriter Writer { get; } = writer;
+        public bool Disposed { get; set; }
     }
 }

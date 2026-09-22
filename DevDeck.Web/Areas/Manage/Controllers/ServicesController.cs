@@ -215,18 +215,18 @@ public sealed class ServicesController : Controller
     public async Task<IActionResult> Edit(int id, ServiceEditViewModel model)
     {
         ViewBag.Presets = _presets.All();
-        ValidateServiceModel(model);
-        if (!ModelState.IsValid)
-        {
-            return View(model);
-        }
-
         await using var db = await _dbFactory.CreateDbContextAsync();
         var entity = await db.DevServices
             .Include(s => s.EnvironmentVariables)
             .Include(s => s.HealthChecks)
             .FirstOrDefaultAsync(s => s.Id == id);
         if (entity is null) return NotFound();
+
+        ValidateServiceModel(model, entity.WorkingDirectory);
+        if (!ModelState.IsValid)
+        {
+            return View(model);
+        }
 
         if (await db.DevServices.AnyAsync(s => s.Name == model.Name && s.Id != id))
         {
@@ -496,9 +496,14 @@ public sealed class ServicesController : Controller
 
     // Server-side checks beyond the data annotations: things that fail later (at process
     // launch) with a much worse error message if they get into the database.
-    private void ValidateServiceModel(ServiceEditViewModel model)
+    // The working-directory check is skipped for passthru services (DevDeck never launches
+    // them) and for an unchanged directory on edit (e.g. a service imported from another
+    // machine) — StartServiceCoreAsync re-checks it at launch anyway.
+    private void ValidateServiceModel(ServiceEditViewModel model, string? currentWorkingDirectory = null)
     {
-        if (!string.IsNullOrWhiteSpace(model.WorkingDirectory) && !Directory.Exists(model.WorkingDirectory))
+        var directoryChanged = !string.Equals(model.WorkingDirectory, currentWorkingDirectory, StringComparison.Ordinal);
+        if (!model.UseExternalInstance && directoryChanged &&
+            !string.IsNullOrWhiteSpace(model.WorkingDirectory) && !Directory.Exists(model.WorkingDirectory))
         {
             ModelState.AddModelError(nameof(model.WorkingDirectory),
                 $"Directory does not exist on this machine: {model.WorkingDirectory}");

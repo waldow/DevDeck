@@ -8,6 +8,8 @@ public sealed class ProxyDestinationValidatorTests
     [Theory]
     [InlineData("http://localhost:5173/")]
     [InlineData("http://127.0.0.1:5080/")]
+    [InlineData("http://127.0.0.2:5080/")]
+    [InlineData("http://[::1]:5080/")]
     [InlineData("http://app.localhost:5050/")]
     [InlineData("http://10.0.1.5:3000/")]
     [InlineData("http://192.168.1.10:8000/")]

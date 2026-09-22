@@ -58,10 +58,8 @@ public sealed class ProxyDestinationValidator
     {
         host = host.Trim('[', ']');
         if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return true;
-        if (host.Equals("127.0.0.1", StringComparison.Ordinal)) return true;
-        if (host.Equals("::1", StringComparison.Ordinal)) return true;
         if (host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase)) return true;
-        return false;
+        return IPAddress.TryParse(host, out var ip) && IPAddress.IsLoopback(ip);
     }
 
     public static bool IsPrivateIp(string host)

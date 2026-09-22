@@ -1,4 +1,5 @@
 using DevDeck.Web.Data;
+using DevDeck.Web.Data.Entities;
 using DevDeck.Web.Services.Portability;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
@@ -70,7 +71,44 @@ public sealed class PortabilityImportValidationTests : IDisposable
         (await CountRoutesAsync()).Should().Be(1);
     }
 
-    private async Task<PortabilityImportResult> ImportRouteAsync(string matchPath, string destination)
+    [Fact]
+    public async Task Templated_override_is_rendered_against_linked_service_before_validation()
+    {
+        await SeedServiceAsync("api", url: null);
+
+        var result = await ImportRouteAsync(matchPath: "/api/{**catch-all}", destination: "http://localhost:{port}/api", serviceName: "api");
+
+        result.Errors.Should().BeEmpty();
+        result.Created.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Linked_service_with_external_url_is_skipped_when_no_override()
+    {
+        await SeedServiceAsync("remote", url: "http://evil.example.com/");
+
+        var result = await ImportRouteAsync(matchPath: "/api/{**catch-all}", destination: null, serviceName: "remote");
+
+        result.Created.Should().Be(0);
+        result.Errors.Should().ContainSingle().Which.Should().Contain("AllowExternalDestinations");
+    }
+
+    private async Task SeedServiceAsync(string name, string? url)
+    {
+        await using var db = _factory.CreateDbContext();
+        db.DevServices.Add(new DevService
+        {
+            Name = name,
+            ServiceType = "NodeApi",
+            WorkingDirectory = "/tmp",
+            StartCommand = "npm",
+            Port = 3001,
+            Url = url,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task<PortabilityImportResult> ImportRouteAsync(string matchPath, string? destination, string? serviceName = null)
     {
         var json = $$"""
         {
@@ -78,7 +116,8 @@ public sealed class PortabilityImportValidationTests : IDisposable
           "routes": [{
             "name": "Imported",
             "enabled": true,
-            "destinationUrlOverride": "{{destination}}",
+            "serviceName": {{(serviceName is null ? "null" : $"\"{serviceName}\"")}},
+            "destinationUrlOverride": {{(destination is null ? "null" : $"\"{destination}\"")}},
             "matchPath": "{{matchPath}}",
             "pathTransformMode": "None"
           }]
