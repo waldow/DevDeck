@@ -36,6 +36,19 @@ public sealed class ProcessLogBuffer
             : Array.Empty<LogLine>();
     }
 
+    /// <summary>
+    /// Lines appended after sequence number <paramref name="since"/> (the <see cref="LiveLogSlice.Next"/>
+    /// of a previous call; 0 for everything). A line count can't serve as this cursor: trimming
+    /// the front of the buffer shrinks the count, and a count-based cursor then points past the
+    /// end and skips new lines until the count catches up.
+    /// </summary>
+    public LiveLogSlice SnapshotSince(int serviceId, long since)
+    {
+        return _buffers.TryGetValue(serviceId, out var buffer)
+            ? buffer.Since(since)
+            : new LiveLogSlice(Array.Empty<LogLine>(), Next: 0, Dropped: 0, Reset: since > 0);
+    }
+
     public void Clear(int serviceId)
     {
         if (_buffers.TryGetValue(serviceId, out var buffer))
@@ -51,6 +64,10 @@ public sealed class ProcessLogBuffer
         private readonly int _maxLines;
         private readonly int _trimAmount;
 
+        // Sequence number the next appended line gets; _lines[0] is number _next - _lines.Count.
+        // Never reset (not even by Clear), so cursors handed out stay valid.
+        private long _next;
+
         public RingBuffer(int maxLines, int trimAmount)
         {
             _maxLines = maxLines;
@@ -63,6 +80,7 @@ public sealed class ProcessLogBuffer
             lock (_lock)
             {
                 _lines.Add(line);
+                _next++;
                 if (_lines.Count > _maxLines)
                 {
                     _lines.RemoveRange(0, _trimAmount);
@@ -78,6 +96,24 @@ public sealed class ProcessLogBuffer
             }
         }
 
+        public LiveLogSlice Since(long since)
+        {
+            lock (_lock)
+            {
+                // A cursor ahead of this buffer came from before a DevDeck restart: start over.
+                if (since > _next)
+                {
+                    return new LiveLogSlice(_lines.ToArray(), _next, Dropped: 0, Reset: true);
+                }
+
+                var first = _next - _lines.Count;
+                var start = Math.Max(since, first);
+                var lines = _lines.GetRange((int)(start - first), (int)(_next - start)).ToArray();
+                var dropped = since > 0 ? Math.Max(0, first - since) : 0;
+                return new LiveLogSlice(lines, _next, dropped, Reset: false);
+            }
+        }
+
         public void Clear()
         {
             lock (_lock)
@@ -87,3 +123,10 @@ public sealed class ProcessLogBuffer
         }
     }
 }
+
+/// <param name="Lines">Lines after the requested cursor, oldest first.</param>
+/// <param name="Next">Cursor to pass next time.</param>
+/// <param name="Dropped">Lines after the cursor that were trimmed before they could be read.</param>
+/// <param name="Reset">The cursor was not from this buffer (DevDeck restarted); the caller should
+/// discard what it has and show <paramref name="Lines"/> from scratch.</param>
+public sealed record LiveLogSlice(IReadOnlyList<LogLine> Lines, long Next, long Dropped, bool Reset);

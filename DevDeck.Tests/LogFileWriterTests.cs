@@ -59,6 +59,25 @@ public sealed class LogFileWriterTests : IDisposable
     }
 
     [Fact]
+    public async Task Memory_of_finally_closed_logs_is_bounded()
+    {
+        // Every finished run used to leave its path in a set that was never pruned.
+        var writer = new LogFileWriter();
+        var paths = Enumerable.Range(0, 600).Select(i => Path.Combine(_temp.FullName, $"run-{i}.log")).ToList();
+        foreach (var path in paths)
+        {
+            writer.Close(path, allowReopen: false);
+        }
+
+        writer.Append(paths[0], Line("oldest, forgotten"));
+        writer.Append(paths[^1], Line("newest, still closed"));
+        await writer.DisposeAsync();
+
+        File.Exists(paths[0]).Should().BeTrue();
+        File.Exists(paths[^1]).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task Append_after_dispose_is_a_noop()
     {
         var writer = new LogFileWriter();

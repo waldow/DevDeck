@@ -222,7 +222,18 @@ public sealed class ServicesController : Controller
             .FirstOrDefaultAsync(s => s.Id == id);
         if (entity is null) return NotFound();
 
+        var isRunning = _manager.GetRunningProcess(id) is not null;
+        ViewBag.IsRunning = isRunning;
         ValidateServiceModel(model, entity.WorkingDirectory);
+
+        // Same rule as ToggleExternal: switching a running managed service to passthru would
+        // leave its process running with no Stop control anywhere in the UI.
+        if (model.UseExternalInstance && !entity.UseExternalInstance && isRunning)
+        {
+            ModelState.AddModelError(nameof(model.UseExternalInstance),
+                "Stop the service before switching it to external (passthru) mode.");
+        }
+
         if (!ModelState.IsValid)
         {
             return View(model);
@@ -516,6 +527,19 @@ public sealed class ServicesController : Controller
                 ModelState.AddModelError(nameof(model.EnvironmentVariables),
                     $"'{row.Key}' is not a valid environment variable name (no '=', whitespace, or control characters).");
             }
+        }
+
+        // (DevServiceId, Key) is unique in the database; report a repeat here instead of
+        // failing the save with a DbUpdateException.
+        var duplicateKeys = model.EnvironmentVariables
+            .Where(r => !r.Delete && !string.IsNullOrWhiteSpace(r.Key))
+            .GroupBy(r => r.Key, StringComparer.Ordinal)
+            .Where(g => g.Count() > 1)
+            .Select(g => g.Key);
+        foreach (var key in duplicateKeys)
+        {
+            ModelState.AddModelError(nameof(model.EnvironmentVariables),
+                $"Environment variable '{key}' is defined more than once.");
         }
     }
 

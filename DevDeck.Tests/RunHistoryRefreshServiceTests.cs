@@ -98,35 +98,62 @@ public sealed class RunHistoryRefreshServiceTests : IDisposable
     // --- runs whose process is still tracked in memory ---
 
     [Fact]
-    public async Task Refresh_marks_running_run_crashed_when_tracked_process_exited_nonzero()
+    public async Task Refresh_leaves_exited_tracked_run_to_the_exit_handler()
     {
+        // The manager's exit handler finalizes tracked runs (and may already have disposed the
+        // Process, making its exit code unreadable); the refresh must not race it.
         var runId = await SeedRunAsync(ProcessStatusNames.Running);
-        var process = StartExitedProcess(exitCode: 1);
+        var process = StartExitedProcess(exitCode: 0);
         var refresh = CreateService(new FakeProcessManager(Info(runId, process, ProcessStatus.Running)));
 
         var changed = await refresh.RefreshActiveRunsAsync();
 
-        changed.Should().Be(1);
+        changed.Should().Be(0);
         await using var db = _factory.CreateDbContext();
         var run = await db.ServiceRuns.SingleAsync(r => r.Id == runId);
-        run.Status.Should().Be(ProcessStatusNames.Crashed);
-        run.ExitCode.Should().Be(1);
-        run.StoppedUtc.Should().NotBeNull();
+        run.Status.Should().Be(ProcessStatusNames.Running);
+        run.StoppedUtc.Should().BeNull();
     }
 
     [Fact]
-    public async Task Refresh_marks_stopping_run_killed_when_tracked_process_exited_after_kill()
+    public async Task Refresh_leaves_tracked_run_whose_process_has_not_started_yet()
     {
-        var runId = await SeedRunAsync(ProcessStatusNames.Stopping);
-        var process = StartExitedProcess(exitCode: 1);
-        var refresh = CreateService(new FakeProcessManager(Info(runId, process, ProcessStatus.Stopping, killIssued: true)));
+        // Between being tracked and Process.Start() the Process has no OS process, and
+        // HasExited throws — that must not read as "exited".
+        var runId = await SeedRunAsync(ProcessStatusNames.Starting);
+        using var notStarted = new Process { StartInfo = new ProcessStartInfo("dotnet") };
+        var refresh = CreateService(new FakeProcessManager(Info(runId, notStarted, ProcessStatus.Starting)));
 
-        await refresh.RefreshActiveRunsAsync();
+        var changed = await refresh.RefreshActiveRunsAsync();
 
+        changed.Should().Be(0);
         await using var db = _factory.CreateDbContext();
         var run = await db.ServiceRuns.SingleAsync(r => r.Id == runId);
-        run.Status.Should().Be(ProcessStatusNames.Killed);
-        run.StoppedUtc.Should().NotBeNull();
+        run.Status.Should().Be(ProcessStatusNames.Starting);
+        run.StoppedUtc.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Refresh_skips_untracked_run_of_a_service_with_an_operation_in_flight()
+    {
+        // e.g. a run still Starting while Azurite comes up, before its process is tracked.
+        var runId = await SeedRunAsync(ProcessStatusNames.Starting);
+        int serviceId;
+        await using (var seeded = _factory.CreateDbContext())
+        {
+            serviceId = (await seeded.ServiceRuns.SingleAsync(r => r.Id == runId)).DevServiceId;
+        }
+        var manager = new FakeProcessManager();
+        manager.BusyServiceIds.Add(serviceId);
+        var refresh = CreateService(manager);
+
+        var changed = await refresh.RefreshActiveRunsAsync();
+
+        changed.Should().Be(0);
+        await using var db = _factory.CreateDbContext();
+        var run = await db.ServiceRuns.SingleAsync(r => r.Id == runId);
+        run.Status.Should().Be(ProcessStatusNames.Starting);
+        run.StoppedUtc.Should().BeNull();
     }
 
     [Fact]
@@ -279,6 +306,12 @@ public sealed class RunHistoryRefreshServiceTests : IDisposable
         public IReadOnlyCollection<RunningProcessInfo> GetRunningProcesses() => _running;
 
         public IReadOnlyList<LogLine> GetLiveLogs(int serviceId) => [];
+
+        public LiveLogSlice GetLiveLogsSince(int serviceId, long since) => new([], 0, 0, false);
+
+        public HashSet<int> BusyServiceIds { get; } = new();
+
+        public bool IsServiceBusy(int serviceId) => BusyServiceIds.Contains(serviceId);
 
         public void ClearLiveLogs(int serviceId)
         {

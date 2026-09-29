@@ -19,6 +19,8 @@
     function startable() {
         return Array.from(root.querySelectorAll('.service-card'))
             .filter(card => card.getAttribute('data-enabled') === 'true')
+            // Passthru services run outside DevDeck; the server refuses to start them.
+            .filter(card => card.getAttribute('data-external') !== 'true')
             .filter(card => {
                 const pill = card.querySelector('[data-field="runtime"]');
                 return pill && !NOT_STARTABLE.has(pill.textContent.trim().toLowerCase());

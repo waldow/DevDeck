@@ -221,15 +221,18 @@ public sealed class AzuriteSupervisor : IAzuriteSupervisor, IAsyncDisposable
         try { return p.Id; } catch { return null; }
     }
 
+    // Host shutdown. Azurite follows the Functions hosts that depend on it: stopped along with
+    // them under DevDeck:StopServicesOnShutdown, otherwise left running just as they are —
+    // killing it would break the hosts that outlive DevDeck, and the next DevDeck start finds
+    // its ports open and reuses it.
     public async ValueTask DisposeAsync()
     {
         var process = _process;
         _process = null;
-        if (process is null) return;
 
         try
         {
-            if (!process.HasExited)
+            if (process is not null && _options.CurrentValue.StopServicesOnShutdown && !process.HasExited)
             {
                 process.Kill(entireProcessTree: true);
                 await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2));
@@ -241,7 +244,8 @@ public sealed class AzuriteSupervisor : IAzuriteSupervisor, IAsyncDisposable
         }
         finally
         {
-            process.Dispose();
+            // Releases DevDeck's handle only; a still-running Azurite keeps running.
+            process?.Dispose();
             _logFileWriter.Close(LogFile);
             _gate.Dispose();
         }

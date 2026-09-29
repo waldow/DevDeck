@@ -51,6 +51,12 @@ public sealed class RunHistoryRefreshService
 
     private async Task<int> RefreshActiveRunsCoreAsync(CancellationToken cancellationToken)
     {
+        // Snapshot the tracked runs BEFORE reading rows. The exit handler writes a run's final
+        // status and only then drops it from the map, so any run the query below still sees as
+        // active is either in this snapshot (and owned by the handler) or genuinely untracked.
+        var trackedByRunId = _processManager.GetRunningProcesses()
+            .ToDictionary(r => r.ServiceRunId);
+
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
         var activeRuns = await db.ServiceRuns
             .Where(r => ActiveStatuses.Contains(r.Status))
@@ -61,18 +67,20 @@ public sealed class RunHistoryRefreshService
             return 0;
         }
 
-        var runningByRunId = _processManager.GetRunningProcesses()
-            .ToDictionary(r => r.ServiceRunId);
         var changed = 0;
         var now = DateTimeOffset.UtcNow;
 
         foreach (var run in activeRuns)
         {
-            if (runningByRunId.TryGetValue(run.Id, out var info))
+            if (trackedByRunId.TryGetValue(run.Id, out var info))
             {
-                if (TryHasExited(info.Process))
+                // Tracked runs are finalized by the process manager's exit handler; here they
+                // are only kept in sync while the process is alive. An exited or not-yet-started
+                // process is left alone: completing it would race the handler, and once the
+                // handler has disposed the Process its exit code reads as null (so a clean exit
+                // would be recorded as Crashed).
+                if (!IsAlive(info.Process))
                 {
-                    changed += CompleteRun(run, now, TryGetExitCode(info.Process), info.KillIssued);
                     continue;
                 }
 
@@ -86,6 +94,15 @@ public sealed class RunHistoryRefreshService
                     run.ProcessId ??= TryGetProcessId(info.Process);
                     changed++;
                 }
+                continue;
+            }
+
+            // A start, stop or restart in flight owns its service's run rows — e.g. a run
+            // still Starting while Azurite comes up, before its process is tracked — as does a
+            // run that became tracked after the snapshot.
+            if (_processManager.IsServiceBusy(run.DevServiceId) ||
+                _processManager.GetRunningProcess(run.DevServiceId)?.ServiceRunId == run.Id)
+            {
                 continue;
             }
 
@@ -115,12 +132,6 @@ public sealed class RunHistoryRefreshService
         return changed;
     }
 
-    private static int CompleteRun(Data.Entities.ServiceRun run, DateTimeOffset stoppedUtc, int? exitCode, bool killIssued)
-    {
-        var newStatus = ProcessStatusNames.ResolveExitStatus(run.Status, exitCode, killIssued);
-        return ApplyCompletion(run, stoppedUtc, newStatus, exitCode);
-    }
-
     private static int CompleteMissingRun(Data.Entities.ServiceRun run, DateTimeOffset stoppedUtc)
     {
         var newStatus = run.Status switch
@@ -147,27 +158,16 @@ public sealed class RunHistoryRefreshService
         return 1;
     }
 
-    private static bool TryHasExited(Process process)
+    // False for an exited, disposed, or not-yet-started process (HasExited throws for the last).
+    private static bool IsAlive(Process process)
     {
         try
         {
-            return process.HasExited;
+            return !process.HasExited;
         }
         catch
         {
-            return true;
-        }
-    }
-
-    private static int? TryGetExitCode(Process process)
-    {
-        try
-        {
-            return process.ExitCode;
-        }
-        catch
-        {
-            return null;
+            return false;
         }
     }
 

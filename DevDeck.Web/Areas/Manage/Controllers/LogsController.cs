@@ -32,19 +32,18 @@ public sealed class LogsController : Controller
     }
 
     [HttpGet("Services/{id:int}/LogsSnapshot")]
-    public IActionResult ServiceLogsSnapshot(int id, [FromQuery] int sinceCount = 0)
+    public IActionResult ServiceLogsSnapshot(int id, [FromQuery] long since = 0)
     {
         var info = _manager.GetRunningProcess(id);
-        var lines = _manager.GetLiveLogs(id);
-        var newSlice = sinceCount <= 0
-            ? lines.Select(l => l.Format()).ToArray()
-            : lines.Skip(Math.Min(sinceCount, lines.Count)).Select(l => l.Format()).ToArray();
+        var slice = _manager.GetLiveLogsSince(id, Math.Max(0, since));
         return Json(new
         {
             serviceId = id,
             isRunning = info is not null,
-            totalCount = lines.Count,
-            lines = newSlice,
+            next = slice.Next,
+            dropped = slice.Dropped,
+            reset = slice.Reset,
+            lines = slice.Lines.Select(l => l.Format()).ToArray(),
         });
     }
 

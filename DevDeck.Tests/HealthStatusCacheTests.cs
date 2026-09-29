@@ -14,6 +14,35 @@ public sealed class HealthStatusCacheTests
     }
 
     [Fact]
+    public void RetainChecks_drops_results_of_checks_no_longer_polled()
+    {
+        // Regression: a disabled/deleted check kept its last Unhealthy forever, so a
+        // RequireHealthyDestination route kept answering 503.
+        var cache = new HealthStatusCache();
+        cache.Set(1, 10, HealthStatusNames.Healthy);
+        cache.Set(1, 11, HealthStatusNames.Unhealthy);
+        cache.Set(2, 20, HealthStatusNames.Unhealthy);
+
+        cache.RetainChecks(new HashSet<int> { 10 });
+
+        cache.Get(1).Should().Be(HealthStatusNames.Healthy);
+        cache.IsHealthy(1).Should().BeTrue();
+        cache.Get(2).Should().Be(HealthStatusNames.Unknown);
+    }
+
+    [Fact]
+    public void RetainChecks_keeps_the_warmup_window()
+    {
+        var cache = new HealthStatusCache();
+        cache.MarkStarting(1, TimeSpan.FromMinutes(1));
+        cache.Set(1, 10, HealthStatusNames.Unhealthy);
+
+        cache.RetainChecks(new HashSet<int>());
+
+        cache.Get(1).Should().Be(HealthStatusNames.Warming);
+    }
+
+    [Fact]
     public void Single_healthy_check_makes_service_healthy()
     {
         var cache = new HealthStatusCache();

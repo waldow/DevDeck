@@ -38,7 +38,7 @@ public sealed class DevDeckProxyConfigProvider : IProxyConfigProvider
                 .OrderBy(r => r.Order)
                 .ToListAsync(cancellationToken);
 
-            var build = _builder.Build(routes);
+            var build = await _builder.BuildAsync(routes);
             var old = Interlocked.Exchange(ref _snapshot,
                 new Snapshot(build.Routes, build.Clusters, build.Warnings));
             old.SignalChange();

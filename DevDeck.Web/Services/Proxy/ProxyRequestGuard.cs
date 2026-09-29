@@ -26,6 +26,14 @@ public sealed class ProxyRequestGuard
 
     public async Task<bool> AllowRequestAsync(HttpContext context)
     {
+        // ReservedPathMatcherPolicy already keeps reserved paths away from proxy endpoints;
+        // this is the backstop so /Manage can never be forwarded even if that is bypassed.
+        if (ReservedPaths.IsReservedRequestPath(context.Request.Path))
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return false;
+        }
+
         var metadata = context.GetRouteModel()?.Config.Metadata;
         if (metadata is null || !TryGetInt(metadata, "DevDeck.ServiceId", out var serviceId))
         {

@@ -71,6 +71,13 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
 
     public IReadOnlyList<LogLine> GetLiveLogs(int serviceId) => _logBuffer.Snapshot(serviceId);
 
+    public LiveLogSlice GetLiveLogsSince(int serviceId, long since) => _logBuffer.SnapshotSince(serviceId, since);
+
+    // True while a start, stop or restart holds the service's lock, i.e. that operation owns
+    // the service's run rows until it finishes.
+    public bool IsServiceBusy(int serviceId) =>
+        _serviceLocks.TryGetValue(serviceId, out var serviceLock) && serviceLock.CurrentCount == 0;
+
     public void ClearLiveLogs(int serviceId) => _logBuffer.Clear(serviceId);
 
     public async Task<StartServiceResult> StartServiceAsync(int serviceId, CancellationToken cancellationToken)
@@ -188,7 +195,14 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
         var logPathLocal = logPath;
 
         var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
-        RunningProcessInfo info;
+
+        // Exited can fire before this method has attached the output readers and recorded the
+        // run as Running (a command that fails instantly). Finalizing at that point would
+        // dispose the Process under us, lose all of the run's output, and let the Running save
+        // below overwrite the final status — so the exit handler first waits for this gate,
+        // which opens once the start sequence has finished (or failed).
+        var startGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        RunningProcessInfo? info = null;
         try
         {
             process.OutputDataReceived += (_, e) =>
@@ -207,7 +221,8 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
                 // would take down the whole host, so nothing may run outside this try.
                 try
                 {
-                    await HandleProcessExitedAsync(serviceIdLocal, runIdLocal, logPathLocal, process);
+                    await startGate.Task;
+                    await HandleProcessExitedAsync(serviceIdLocal, runIdLocal, logPathLocal, process, info);
                 }
                 catch (Exception ex)
                 {
@@ -230,6 +245,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
             if (!_running.TryAdd(service.Id, info))
             {
                 process.Dispose();
+                startGate.TrySetResult();
                 return new StartServiceResult { ServiceId = service.Id, RunId = run.Id, Success = false, Error = "Service is already running." };
             }
 
@@ -239,39 +255,61 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
         }
         catch (Exception ex)
         {
-            _running.TryRemove(service.Id, out _);
+            if (info is not null)
+            {
+                _running.TryRemove(new KeyValuePair<int, RunningProcessInfo>(service.Id, info));
+            }
             process.Dispose();
+            startGate.TrySetResult();
             run.Status = ProcessStatusNames.FailedToStart;
             run.StoppedUtc = DateTimeOffset.UtcNow;
             run.LastError = ex.Message;
-            await db.SaveChangesAsync(cancellationToken);
+            await db.SaveChangesAsync(CancellationToken.None);
             AppendSystemLine(service.Id, run.Id, logPath, $"Failed to start: {ex.Message}");
             return new StartServiceResult { ServiceId = serviceId, RunId = run.Id, Success = false, Error = ex.Message };
         }
 
-        info.Status = ProcessStatus.Running;
-        run.Status = ProcessStatusNames.Running;
-        run.ProcessId = SafePid(process);
-        await db.SaveChangesAsync(cancellationToken);
-
-        // Give health checks a grace window before they can fail proxy gates.
-        _healthStatusCache.MarkStarting(service.Id, PostStartHealthWarmup);
-
+        // The process is live from here on, so nothing below may bail out early: an aborted
+        // request must not leave a tracked process whose output pipes are never drained (it
+        // would block once the pipe buffer fills). Hence no caller token, and failures are
+        // only logged.
         try
         {
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to begin stream read for service {ServiceId}", serviceIdLocal);
-        }
+            info.Status = ProcessStatus.Running;
+            run.Status = ProcessStatusNames.Running;
+            run.ProcessId = SafePid(process);
+            try
+            {
+                await db.SaveChangesAsync(CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to record ServiceRun {RunId} as running", run.Id);
+            }
 
-        AppendSystemLine(service.Id, run.Id, logPath, $"Process started with PID {run.ProcessId}");
-        if (argsRender.UnknownPlaceholders.Count > 0)
+            // Give health checks a grace window before they can fail proxy gates.
+            _healthStatusCache.MarkStarting(service.Id, PostStartHealthWarmup);
+
+            try
+            {
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to begin stream read for service {ServiceId}", serviceIdLocal);
+            }
+
+            AppendSystemLine(service.Id, run.Id, logPath, $"Process started with PID {run.ProcessId}");
+            if (argsRender.UnknownPlaceholders.Count > 0)
+            {
+                AppendSystemLine(service.Id, run.Id, logPath,
+                    $"Unresolved placeholders in arguments: {string.Join(", ", argsRender.UnknownPlaceholders)}");
+            }
+        }
+        finally
         {
-            AppendSystemLine(service.Id, run.Id, logPath,
-                $"Unresolved placeholders in arguments: {string.Join(", ", argsRender.UnknownPlaceholders)}");
+            startGate.TrySetResult();
         }
 
         return new StartServiceResult
@@ -624,14 +662,15 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
         AppendSystemLine(serviceId, runId, logPath, $"Environment overrides: {FormatEnvironmentOverrides(environment)}");
     }
 
-    private async Task HandleProcessExitedAsync(int serviceId, long runId, string logPath, Process process)
+    private async Task HandleProcessExitedAsync(int serviceId, long runId, string logPath, Process process, RunningProcessInfo? info)
     {
         int? exitCode = null;
         try { exitCode = process.ExitCode; } catch { /* ignore */ }
 
         // Let the async stdout/stderr readers deliver buffered tail lines before the exit
         // line is written. WaitForExitAsync returns once both streams hit EOF (usually at
-        // once); the cap stops a grandchild holding the inherited pipe open from stalling us.
+        // once) — the readers are attached by now, as this handler only runs after the start
+        // gate opens; the cap stops a grandchild holding the inherited pipe open from stalling us.
         using (var drain = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
         {
             try { await process.WaitForExitAsync(drain.Token); } catch { /* capped / disposed */ }
@@ -640,10 +679,9 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
         AppendSystemLine(serviceId, runId, logPath, $"Process exited with code {exitCode?.ToString() ?? "?"}");
 
         // Finalize the run while it is still in the running map: RunHistoryRefreshService
-        // only reconciles runs that are NOT in the map, so it can't race this update, and
-        // Restart/Stop (which wait for the removal below) see the new run strictly after
-        // this run's exit line and final status.
-        _running.TryGetValue(serviceId, out var info);
+        // leaves tracked runs to this handler (and snapshots the map before reading rows),
+        // so it can't race this update, and Restart/Stop (which wait for the removal below)
+        // see the new run strictly after this run's exit line and final status.
         try
         {
             await using var db = await _dbFactory.CreateDbContextAsync();

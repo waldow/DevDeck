@@ -49,6 +49,42 @@ public sealed class PortProbeServiceTests
         }
     }
 
+    [Fact]
+    public async Task IsPortOpenAsync_sees_a_server_listening_only_on_ipv6_loopback()
+    {
+        // e.g. a Node 17+ dev server bound to "localhost" that resolved to ::1.
+        if (!Socket.OSSupportsIPv6) return;
+        var listener = new TcpListener(IPAddress.IPv6Loopback, 0);
+        listener.Start();
+        try
+        {
+            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            var probe = new PortProbeService(new FakeProcessManager());
+
+            (await probe.IsPortOpenAsync(port)).Should().BeTrue();
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    [Fact]
+    public async Task IsPortOpenAsync_reports_a_closed_port_within_one_probe_timeout()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        var probe = new PortProbeService(new FakeProcessManager());
+
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        var open = await probe.IsPortOpenAsync(port);
+
+        open.Should().BeFalse();
+        timer.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(450), "the loopback aliases are probed concurrently");
+    }
+
     private sealed class FakeProcessManager : IDevDeckProcessManager
     {
         public Task<StartServiceResult> StartServiceAsync(int serviceId, CancellationToken cancellationToken) =>
@@ -74,6 +110,10 @@ public sealed class PortProbeServiceTests
         public IReadOnlyCollection<RunningProcessInfo> GetRunningProcesses() => [];
 
         public IReadOnlyList<LogLine> GetLiveLogs(int serviceId) => [];
+
+        public LiveLogSlice GetLiveLogsSince(int serviceId, long since) => new([], 0, 0, false);
+
+        public bool IsServiceBusy(int serviceId) => false;
 
         public void ClearLiveLogs(int serviceId)
         {

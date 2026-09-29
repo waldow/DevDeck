@@ -17,7 +17,7 @@ logs, watch health, and route `http://localhost:5050/app`, `/api`, … to the ri
 
 - `DevDeck.slnx` — solution. Two projects, both `net10.0`:
   - `DevDeck.Web` — the application (only deps: `Microsoft.EntityFrameworkCore.Sqlite`, `Yarp.ReverseProxy`).
-  - `DevDeck.Tests` — xUnit + FluentAssertions unit tests (currently **175**, all green).
+  - `DevDeck.Tests` — xUnit + FluentAssertions unit tests (currently **239**, all green).
 - `DevDeck_Specification_v2_Reverse_Proxy.md` — the original design spec. **Historical**: v1 is fully built,
   so this is no longer a build target. Its section numbers (e.g. §8 entities, §18 proxy) are still useful as
   rationale when a change touches a documented decision — cite them, but the code is the source of truth.
@@ -48,11 +48,16 @@ Key singletons registered in `Program.cs`:
   `Process.Kill(entireProcessTree: true)`).
 - `ProcessLogBuffer` + `LogFileWriter` — dual-write each log line to the in-memory ring (5000 lines/service,
   trim 1000) **and** to disk.
-- `RunHistoryRefreshService` — reconciles `ServiceRun` rows when processes exit out-of-band.
+- `RunHistoryRefreshService` — reconciles `ServiceRun` rows when processes exit out-of-band. Runs the process
+  manager still tracks (or has a start/stop in flight for — `IsServiceBusy`) belong to the manager's exit
+  handler and are left alone; the handler itself waits for the start sequence to finish before finalizing.
 - `DevDeckProxyConfigProvider : IProxyConfigProvider` — builds YARP route/cluster snapshots in memory from
   `ProxyRoute` rows and exposes a change token for hot reload. **Must not query SQLite per proxied request.**
+  `ProxyRouteBuilder.BuildAsync` also runs each route through YARP's own `IConfigValidator` and drops invalid
+  ones with a warning — YARP rejects a whole snapshot (and throws at startup) if any single route is invalid.
 - `HealthCheckBackgroundService` (hosted) + `HealthStatusCache` — poll enabled `ServiceHealthCheck` URLs.
-- `PortProbeService` — TCP-probes `127.0.0.1:{port}` to detect conflicts.
+- `PortProbeService` — TCP-probes `127.0.0.1:{port}` and `[::1]:{port}` concurrently (a dev server bound to
+  `localhost` may listen on IPv6 only) to detect conflicts and passthru/readiness state.
 - `AzuriteSupervisor` (`IAzuriteSupervisor`) — see below.
 - `AutoStartHostedService` (hosted) — on boot, starts enabled + `AutoStart` services in `DisplayOrder` (only
   when `AutoStartEnabledServices` is set).
@@ -71,7 +76,9 @@ Order matters and is load-bearing:
    `UseAuthorization`.
 4. **MVC routes are mapped BEFORE `app.MapReverseProxy()`** so `/Manage` always wins. Do not reorder.
 5. `MapReverseProxy` runs only when `ReverseProxy.Enabled`, and every proxied request first passes
-   `ProxyRequestGuard.AllowRequestAsync`.
+   `ProxyRequestGuard.AllowRequestAsync`. Mapping order alone does not make MVC win — endpoint routing ranks
+   by `Order` first — so `ReservedPathMatcherPolicy` (a routing `MatcherPolicy`) removes proxy endpoints from
+   the candidates of any request under a reserved prefix.
 6. `MapGet("/")` → redirect to `/Manage` with `WithOrder(int.MaxValue)` so an explicit catch-all route can
    take precedence.
 
@@ -84,8 +91,11 @@ is a regression even if it compiles:
    There is no endpoint that accepts a command string.
 2. **`/Manage` (case-insensitive) and other reserved prefixes** (`/css`, `/js`, `/lib`, `/images`,
    `/favicon.ico`, `/_devdeck`) must never be reachable through a proxy route — enforced by `ReservedPaths`
-   + `ProxyDestinationValidator` at config time and `ProxyRequestGuard` at request time.
-3. **Catch-all routes are disabled** unless `ReverseProxy.AllowCatchAllRoutes` is set.
+   + `ProxyDestinationValidator` at config time and by `ReservedPathMatcherPolicy` (with a
+   `ProxyRequestGuard` backstop) at request time, whatever the route's `Order`.
+3. **Catch-all routes are disabled** unless `ReverseProxy.AllowCatchAllRoutes` is set. `ReservedPaths` judges
+   the parsed template: any match path with no literal text (`/`, `/{**path}`, `/{x}/{**rest}`) counts as a
+   catch-all, whatever its parameters are named.
 4. **Proxy destinations default to localhost / 127.0.0.1 / `*.localhost` / private networks only.** Public
    destinations require `ReverseProxy.AllowExternalDestinations = true`.
 5. **MVC before `MapReverseProxy()`** (see pipeline above).
@@ -104,7 +114,8 @@ is a regression even if it compiles:
   - container with `data-poll`, rows/cards with `data-service-id` and `data-enabled`,
   - status pills marked `data-field="runtime"` / `data-field="health"`, classed `pill-{status-lowercased}`.
   - `wwwroot/js/dashboard.js` (cards) and `wwwroot/js/services.js` (table) implement this;
-    `start-all.js` drives the staggered launch cascade; `logs.js` streams `GET /Manage/Services/{id}/LogsSnapshot`.
+    `start-all.js` drives the staggered launch cascade; `logs.js` streams `GET /Manage/Services/{id}/LogsSnapshot`
+    using a `since` sequence cursor (not a line count — the ring buffer trims its front).
   When adding a live surface, reuse these data attributes and the snapshot endpoint rather than inventing a new
   channel. Start/Stop/Restart actions on `ServicesController` return JSON when the caller sends
   `X-Requested-With: XMLHttpRequest` / `Accept: application/json`, enabling in-place AJAX updates.
@@ -123,7 +134,9 @@ is a regression even if it compiles:
 `AzuriteSupervisor` ensures the Azurite storage emulator is listening before an Azure Functions host starts
 (the Functions runtime needs `AzureWebJobsStorage`). If Azurite's ports are already up it is reused; otherwise
 DevDeck launches the global `azurite` CLI as a managed background process and waits for its ports. Configurable
-under `DevDeck:Azurite` (command, blob/queue/table ports, startup timeout).
+under `DevDeck:Azurite` (command, blob/queue/table ports, startup timeout). On DevDeck shutdown a DevDeck-launched
+Azurite follows the Functions hosts that need it: stopped only when `StopServicesOnShutdown` is set, otherwise left
+running (and reused on the next start).
 
 ## Passthru / external-instance mode
 
@@ -143,7 +156,8 @@ coherently — toggling only needs a YARP `ReloadAsync()`. Passthru services are
 `PortabilityExporter` / `PortabilityImporter` round-trip services and proxy routes as JSON. Foreign references
 use **names** (not ids) so files are portable across machines; importing updates same-named rows in place and
 creates new ones. Secrets are excluded unless `includeSecrets` is requested. Route imports apply the same
-safety checks as the route editor (`ReservedPaths` + `ProxyDestinationValidator`) and skip violating rows
+safety checks as the route editor (`ReservedPaths` + `ProxyDestinationValidator`, then YARP validation via
+`ProxyRouteBuilder.ValidateAsync`) and skip violating rows
 with an error in the result. The `_ImportExportToolbar`
 partial provides the UI. `devdeck-main-react-api-routes.json` at the repo root is an example export.
 
@@ -167,7 +181,7 @@ on Linux/WSL, `%LOCALAPPDATA%\DevDeck\` on Windows. Holds `devdeck.db` and `logs
 
 ```
 dotnet build                                                          # build the solution (DevDeck.slnx)
-dotnet test                                                           # run all unit tests (175)
+dotnet test                                                           # run all unit tests (239)
 dotnet run --project DevDeck.Web                                      # launch on http://localhost:5050
 dotnet ef migrations add <Name> --project DevDeck.Web -o Migrations   # new EF migration
 ```

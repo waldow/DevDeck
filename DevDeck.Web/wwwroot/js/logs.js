@@ -5,7 +5,10 @@
     const runState = document.getElementById('runState');
     const auto = document.getElementById('autoscroll');
     const countEl = document.getElementById('lineCount');
-    let seen = 0;
+    // Server-issued sequence cursor, not a line count: the live buffer trims its oldest lines,
+    // so a count would stop matching positions in it after the first trim.
+    let cursor = 0;
+    let shown = 0;
 
     // One source of truth: each rule carries the boundaried pattern used to detect *and*
     // classify a token. A sticky clone of each (built below) drives a single left-to-right
@@ -123,11 +126,24 @@
         return div;
     }
 
+    function renderGap(count) {
+        const div = document.createElement('div');
+        div.className = 'log-line SYS';
+        appendText(div, `… ${count} line${count === 1 ? '' : 's'} trimmed from the live buffer before they could be shown (the run's log file has them)`);
+        return div;
+    }
+
     async function tick() {
         try {
-            const res = await fetch(`/Manage/Services/${serviceId}/LogsSnapshot?sinceCount=${seen}`);
+            const res = await fetch(`/Manage/Services/${serviceId}/LogsSnapshot?since=${cursor}`);
             if (!res.ok) return;
             const data = await res.json();
+
+            if (data.reset) {
+                // DevDeck restarted since our cursor was issued; start the view over.
+                panel.replaceChildren();
+                shown = 0;
+            }
 
             if (runState) {
                 runState.textContent = data.isRunning ? 'Running' : 'Stopped';
@@ -135,16 +151,19 @@
                 runState.classList.toggle('pill-stopped', !data.isRunning);
             }
 
-            if (Array.isArray(data.lines) && data.lines.length > 0) {
+            const lines = Array.isArray(data.lines) ? data.lines : [];
+            if (lines.length > 0 || data.dropped > 0) {
                 const frag = document.createDocumentFragment();
-                for (const line of data.lines) {
+                if (data.dropped > 0) frag.appendChild(renderGap(data.dropped));
+                for (const line of lines) {
                     frag.appendChild(renderLine(line));
                 }
                 panel.appendChild(frag);
-                seen = data.totalCount;
-                if (countEl) countEl.textContent = `${seen} lines`;
+                shown += lines.length;
                 if (auto && auto.checked) panel.scrollTop = panel.scrollHeight;
             }
+            if (typeof data.next === 'number') cursor = data.next;
+            if (countEl) countEl.textContent = `${shown} lines`;
         } catch (_) { /* swallow */ }
     }
 

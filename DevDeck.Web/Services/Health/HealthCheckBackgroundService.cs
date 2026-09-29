@@ -63,6 +63,7 @@ public sealed class HealthCheckBackgroundService : BackgroundService
             .Include(c => c.DevService)
             .Where(c => c.Enabled)
             .ToListAsync(token);
+        _healthStatusCache.RetainChecks(checks.Select(c => c.Id).ToHashSet());
 
         var client = _httpClientFactory.CreateClient("DevDeck.HealthCheck");
         client.Timeout = TimeSpan.FromSeconds(3);

@@ -13,6 +13,10 @@ public interface IDevDeckProcessManager
     RunningProcessInfo? GetRunningProcess(int serviceId);
     IReadOnlyCollection<RunningProcessInfo> GetRunningProcesses();
     IReadOnlyList<LogLine> GetLiveLogs(int serviceId);
+    /// <summary>Live log lines appended after sequence number <paramref name="since"/>.</summary>
+    LiveLogSlice GetLiveLogsSince(int serviceId, long since);
+    /// <summary>True while a start, stop or restart of the service is in progress.</summary>
+    bool IsServiceBusy(int serviceId);
     void ClearLiveLogs(int serviceId);
     void AppendProxyLog(RunningProcessInfo info, string text);
 }

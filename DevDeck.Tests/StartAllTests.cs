@@ -9,6 +9,7 @@ using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -22,19 +23,26 @@ namespace DevDeck.Tests;
 // test deterministic while still driving the genuine method.
 public sealed class StartAllTests : IDisposable
 {
-    private readonly SqliteConnection _connection;
+    // A real database file, one connection per DbContext as in production: the manager's exit
+    // handler writes while tests poll, which a single shared in-memory connection can't serve
+    // concurrently ("database is locked").
+    private readonly string _databaseFile = Path.Combine(Path.GetTempPath(), $"devdeck-tests-{Guid.NewGuid():N}.db");
+    private readonly string _connectionString;
     private readonly TestDbContextFactory _factory;
 
     public StartAllTests()
     {
-        _connection = new SqliteConnection("DataSource=:memory:");
-        _connection.Open();
-        _factory = new TestDbContextFactory(_connection);
+        _connectionString = $"Data Source={_databaseFile}";
+        _factory = new TestDbContextFactory(_connectionString);
         using var db = _factory.CreateDbContext();
         db.Database.EnsureCreated();
     }
 
-    public void Dispose() => _connection.Dispose();
+    public void Dispose()
+    {
+        SqliteConnection.ClearAllPools();
+        try { File.Delete(_databaseFile); } catch (IOException) { /* a late exit handler may still hold it */ }
+    }
 
     [Fact]
     public async Task StartAll_targets_enabled_services_in_display_order_and_skips_disabled()
@@ -248,6 +256,108 @@ public sealed class StartAllTests : IDisposable
         await WaitForProcessExitAsync(manager, serviceId);
     }
 
+    [Fact]
+    public async Task Process_that_exits_before_output_readers_attach_keeps_its_output_and_final_status()
+    {
+        // Hold the "Running" save until the child has certainly exited, so Exited fires before
+        // the output readers are attached — the window a command that fails instantly hits.
+        var interceptor = new RunningSaveInterceptor(async () => await Task.Delay(750));
+        var factory = new TestDbContextFactory(_connectionString, interceptor);
+        var serviceId = await SeedFastExitServiceAsync("fast-exit-" + Guid.NewGuid().ToString("N"));
+        var manager = CreateManager(factory: factory);
+
+        var result = await manager.StartServiceAsync(serviceId, CancellationToken.None);
+
+        result.Success.Should().BeTrue();
+        var run = await WaitForCompletedRunAsync(result.RunId!.Value);
+        run.Status.Should().Be(ProcessStatusNames.Crashed, "the run must not be flipped back to Running");
+        run.ExitCode.Should().Be(3);
+
+        var lines = manager.GetLiveLogs(serviceId).Select(l => l.Text).ToList();
+        lines.Should().Contain("fast-exit-output");
+        var started = lines.FindIndex(l => l.StartsWith("Process started", StringComparison.Ordinal));
+        var exited = lines.FindIndex(l => l.StartsWith("Process exited", StringComparison.Ordinal));
+        started.Should().BeGreaterThanOrEqualTo(0);
+        exited.Should().BeGreaterThan(started);
+        lines.IndexOf("fast-exit-output").Should().BeLessThan(exited);
+    }
+
+    [Fact]
+    public async Task Start_survives_the_request_being_aborted_once_the_process_is_live()
+    {
+        // The request token is cancelled while the run is being recorded as Running (the
+        // browser navigated away). The live process must still get its output readers.
+        using var requestAborted = new CancellationTokenSource();
+        var interceptor = new RunningSaveInterceptor(() =>
+        {
+            requestAborted.Cancel();
+            return Task.CompletedTask;
+        });
+        var factory = new TestDbContextFactory(_connectionString, interceptor);
+        var serviceId = await SeedFastExitServiceAsync("aborted-start-" + Guid.NewGuid().ToString("N"));
+        var manager = CreateManager(factory: factory);
+
+        var result = await manager.StartServiceAsync(serviceId, requestAborted.Token);
+
+        result.Success.Should().BeTrue();
+        var run = await WaitForCompletedRunAsync(result.RunId!.Value);
+        run.ExitCode.Should().Be(3);
+        manager.GetLiveLogs(serviceId).Select(l => l.Text).Should().Contain("fast-exit-output");
+    }
+
+    private async Task<int> SeedFastExitServiceAsync(string name)
+    {
+        await using var db = _factory.CreateDbContext();
+        var service = new DevService
+        {
+            Name = name,
+            ServiceType = "Custom",
+            WorkingDirectory = AppContext.BaseDirectory,
+            StartCommand = OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/sh",
+            StartArguments = OperatingSystem.IsWindows()
+                ? "/c \"echo fast-exit-output& exit /b 3\""
+                : "-c \"echo fast-exit-output; exit 3\"",
+            Enabled = true,
+        };
+        db.DevServices.Add(service);
+        await db.SaveChangesAsync();
+        return service.Id;
+    }
+
+    private async Task<ServiceRun> WaitForCompletedRunAsync(long runId)
+    {
+        ServiceRun? run = null;
+        await WaitUntilAsync(async () =>
+        {
+            await using var db = _factory.CreateDbContext();
+            run = await db.ServiceRuns.SingleAsync(r => r.Id == runId);
+            return run.StoppedUtc is not null && run.Status != ProcessStatusNames.Running;
+        }, TimeSpan.FromSeconds(20));
+
+        // Give a (buggy) late "Running" save the chance to land before asserting on the row.
+        await Task.Delay(1000);
+        await using var verify = _factory.CreateDbContext();
+        return await verify.ServiceRuns.SingleAsync(r => r.Id == runId);
+    }
+
+    // Runs a hook when a SaveChanges is about to record a ServiceRun as Running.
+    private sealed class RunningSaveInterceptor(Func<Task> onRunningSave) : SaveChangesInterceptor
+    {
+        public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            var recordsRunning = eventData.Context!.ChangeTracker.Entries<ServiceRun>()
+                .Any(e => e.State == EntityState.Modified && e.Entity.Status == ProcessStatusNames.Running);
+            if (recordsRunning)
+            {
+                await onRunningSave();
+            }
+            return result;
+        }
+    }
+
     private static async Task WaitUntilAsync(Func<Task<bool>> condition, TimeSpan timeout)
     {
         var deadline = DateTimeOffset.UtcNow + timeout;
@@ -364,11 +474,11 @@ public sealed class StartAllTests : IDisposable
         await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
     }
 
-    private DevDeckProcessManager CreateManager(StubAzuriteSupervisor? azurite = null)
+    private DevDeckProcessManager CreateManager(StubAzuriteSupervisor? azurite = null, TestDbContextFactory? factory = null)
     {
         var options = new DevDeckOptions { DevelopmentOnly = false }; // allow execution outside Development
         return new DevDeckProcessManager(
-            _factory,
+            factory ?? _factory,
             new ProcessLogBuffer(5000, 1000),
             new LogFileWriter(),
             new CommandTemplateRenderer(),
@@ -413,8 +523,8 @@ public sealed class StartAllTests : IDisposable
     private sealed class TestDbContextFactory : IDbContextFactory<DevDeckDbContext>
     {
         private readonly DbContextOptions<DevDeckDbContext> _options;
-        public TestDbContextFactory(SqliteConnection connection) =>
-            _options = new DbContextOptionsBuilder<DevDeckDbContext>().UseSqlite(connection).Options;
+        public TestDbContextFactory(string connectionString, params IInterceptor[] interceptors) =>
+            _options = new DbContextOptionsBuilder<DevDeckDbContext>().UseSqlite(connectionString).AddInterceptors(interceptors).Options;
         public DevDeckDbContext CreateDbContext() => new(_options);
     }
 }

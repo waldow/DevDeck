@@ -20,6 +20,29 @@ public sealed class HealthStatusCache
         _warmupUntil[serviceId] = DateTimeOffset.UtcNow + warmupWindow;
     }
 
+    /// <summary>
+    /// Drops cached results for checks that are no longer polled (disabled or deleted), so a
+    /// stale Unhealthy can't keep failing a RequireHealthyDestination gate. Warm-up windows are
+    /// kept.
+    /// </summary>
+    public void RetainChecks(IReadOnlySet<int> polledCheckIds)
+    {
+        foreach (var (serviceId, checks) in _byService)
+        {
+            foreach (var checkId in checks.Keys)
+            {
+                if (!polledCheckIds.Contains(checkId))
+                {
+                    checks.TryRemove(checkId, out _);
+                }
+            }
+            if (checks.IsEmpty)
+            {
+                _byService.TryRemove(new KeyValuePair<int, ConcurrentDictionary<int, string>>(serviceId, checks));
+            }
+        }
+    }
+
     public void RemoveService(int serviceId)
     {
         _byService.TryRemove(serviceId, out _);

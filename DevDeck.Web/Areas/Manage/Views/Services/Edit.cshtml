@@ -72,6 +72,7 @@
             <label></label>
             <div class="form-row">
                 <label class="check-strong"><input asp-for="UseExternalInstance" type="checkbox" id="UseExternalInstance" /> Use external instance (passthru)</label>
+                <span asp-validation-for="UseExternalInstance" class="field-validation-error"></span>
                 <span class="hint">DevDeck won't launch this service — it proxies to, health-checks, and reports the status of an instance you run yourself (e.g. under the Visual&nbsp;Studio debugger).</span>
             </div>
 
@@ -89,6 +90,7 @@
     <div class="card section mt-md">
         <div class="card-head"><h2>Environment variables</h2></div>
         <div class="card-pad">
+            <span asp-validation-for="EnvironmentVariables" class="field-validation-error"></span>
             <table class="tbl" id="envvars">
                 <thead><tr><th>Key</th><th>Value</th><th>Secret</th><th class="cell-actions"></th></tr></thead>
                 <tbody>

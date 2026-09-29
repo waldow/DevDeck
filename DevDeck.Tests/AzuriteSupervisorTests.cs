@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Text.RegularExpressions;
 using DevDeck.Web.Options;
 using DevDeck.Web.Services.Commands;
 using DevDeck.Web.Services.Logs;
@@ -59,6 +61,81 @@ public sealed class AzuriteSupervisorTests
 
         result.Success.Should().BeFalse();
         result.Error.Should().Contain("npm install -g azurite");
+    }
+
+    [Theory]
+    [InlineData(false, true)]  // default: Functions hosts outlive DevDeck, so Azurite must too
+    [InlineData(true, false)]  // StopServicesOnShutdown: stopped along with the services
+    public async Task DisposeAsync_stops_a_launched_azurite_only_when_services_are_stopped_on_shutdown(
+        bool stopServicesOnShutdown, bool expectAlive)
+    {
+        var temp = Directory.CreateTempSubdirectory("devdeck-azurite-");
+        int? pid = null;
+        try
+        {
+            var options = new DevDeckOptions
+            {
+                StopServicesOnShutdown = stopServicesOnShutdown,
+                Azurite = new AzuriteOptions
+                {
+                    Command = WriteFakeAzurite(temp.FullName),
+                    BlobPort = FreePort(),
+                    QueuePort = FreePort(),
+                    TablePort = FreePort(),
+                    StartupTimeoutSeconds = 1,
+                },
+            };
+            var supervisor = CreateSupervisor(options);
+            var messages = new List<string>();
+
+            // The fake never opens the ports, so this times out — but leaves the process tracked.
+            await supervisor.EnsureRunningAsync(messages.Add, CancellationToken.None);
+            var launched = messages.Select(m => Regex.Match(m, @"Launched Azurite \(PID (\d+)\)")).Single(m => m.Success);
+            pid = int.Parse(launched.Groups[1].Value);
+
+            await supervisor.DisposeAsync();
+
+            IsAlive(pid.Value).Should().Be(expectAlive);
+        }
+        finally
+        {
+            if (pid is int leftover && IsAlive(leftover))
+            {
+                using var process = Process.GetProcessById(leftover);
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(5000);
+            }
+            temp.Delete(recursive: true);
+        }
+    }
+
+    // A stand-in "azurite" that ignores its arguments and just stays alive.
+    private static string WriteFakeAzurite(string folder)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var cmd = Path.Combine(folder, "fake-azurite.cmd");
+            File.WriteAllText(cmd, "@echo off\r\nping -n 60 127.0.0.1 > nul\r\n");
+            return cmd;
+        }
+
+        var script = Path.Combine(folder, "fake-azurite");
+        File.WriteAllText(script, "#!/bin/sh\nexec sleep 60\n");
+        File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        return script;
+    }
+
+    private static bool IsAlive(int pid)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
     }
 
     private static AzuriteSupervisor CreateSupervisor(DevDeckOptions options) =>

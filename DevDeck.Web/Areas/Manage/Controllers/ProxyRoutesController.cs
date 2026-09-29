@@ -22,6 +22,7 @@ public sealed class ProxyRoutesController : Controller
     private readonly IDbContextFactory<DevDeckDbContext> _dbFactory;
     private readonly DevDeckProxyConfigProvider _provider;
     private readonly ProxyDestinationValidator _validator;
+    private readonly ProxyRouteBuilder _builder;
     private readonly CommandTemplateRenderer _renderer;
     private readonly PortProbeService _portProbe;
     private readonly IDevDeckProcessManager _manager;
@@ -34,6 +35,7 @@ public sealed class ProxyRoutesController : Controller
         IDbContextFactory<DevDeckDbContext> dbFactory,
         DevDeckProxyConfigProvider provider,
         ProxyDestinationValidator validator,
+        ProxyRouteBuilder builder,
         CommandTemplateRenderer renderer,
         PortProbeService portProbe,
         IDevDeckProcessManager manager,
@@ -44,6 +46,7 @@ public sealed class ProxyRoutesController : Controller
         _dbFactory = dbFactory;
         _provider = provider;
         _validator = validator;
+        _builder = builder;
         _renderer = renderer;
         _portProbe = portProbe;
         _manager = manager;
@@ -77,7 +80,7 @@ public sealed class ProxyRoutesController : Controller
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Create(ProxyRouteEditViewModel model)
     {
-        await ValidateAsync(model);
+        await ValidateAsync(model, routeId: 0);
         if (!ModelState.IsValid)
         {
             await PopulateAvailableServicesAsync(model);
@@ -85,26 +88,7 @@ public sealed class ProxyRoutesController : Controller
         }
 
         await using var db = await _dbFactory.CreateDbContextAsync();
-        var entity = new ProxyRoute
-        {
-            Name = model.Name,
-            Enabled = model.Enabled,
-            DevServiceId = model.DevServiceId,
-            DestinationUrlOverride = NormalizeOptional(model.DestinationUrlOverride),
-            MatchPath = model.MatchPath,
-            MatchHostsCsv = model.MatchHostsCsv,
-            Order = model.Order,
-            PathTransformMode = model.PathTransformMode,
-            PathPrefixToRemove = model.PathPrefixToRemove,
-            PathPrefixToAdd = model.PathPrefixToAdd,
-            PathSet = model.PathSet,
-            PreserveHostHeader = model.PreserveHostHeader,
-            AutoStartService = model.AutoStartService,
-            RequireHealthyDestination = model.RequireHealthyDestination,
-            TimeoutSeconds = model.TimeoutSeconds,
-            AuthorizationPolicy = model.AuthorizationPolicy,
-            ShowOnDashboard = model.ShowOnDashboard,
-        };
+        var entity = NewEntity(model);
         db.ProxyRoutes.Add(entity);
         await db.SaveChangesAsync();
         await _provider.ReloadAsync();
@@ -147,7 +131,7 @@ public sealed class ProxyRoutesController : Controller
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Edit(int id, ProxyRouteEditViewModel model)
     {
-        await ValidateAsync(model);
+        await ValidateAsync(model, routeId: id);
         if (!ModelState.IsValid)
         {
             await PopulateAvailableServicesAsync(model);
@@ -158,23 +142,7 @@ public sealed class ProxyRoutesController : Controller
         var entity = await db.ProxyRoutes.FirstOrDefaultAsync(r => r.Id == id);
         if (entity is null) return NotFound();
 
-        entity.Name = model.Name;
-        entity.Enabled = model.Enabled;
-        entity.DevServiceId = model.DevServiceId;
-        entity.DestinationUrlOverride = NormalizeOptional(model.DestinationUrlOverride);
-        entity.MatchPath = model.MatchPath;
-        entity.MatchHostsCsv = model.MatchHostsCsv;
-        entity.Order = model.Order;
-        entity.PathTransformMode = model.PathTransformMode;
-        entity.PathPrefixToRemove = model.PathPrefixToRemove;
-        entity.PathPrefixToAdd = model.PathPrefixToAdd;
-        entity.PathSet = model.PathSet;
-        entity.PreserveHostHeader = model.PreserveHostHeader;
-        entity.AutoStartService = model.AutoStartService;
-        entity.RequireHealthyDestination = model.RequireHealthyDestination;
-        entity.TimeoutSeconds = model.TimeoutSeconds;
-        entity.AuthorizationPolicy = model.AuthorizationPolicy;
-        entity.ShowOnDashboard = model.ShowOnDashboard;
+        ApplyModel(entity, model);
         entity.UpdatedUtc = DateTimeOffset.UtcNow;
 
         await db.SaveChangesAsync();
@@ -253,15 +221,8 @@ public sealed class ProxyRoutesController : Controller
             vm.DestinationPortOpen = await _portProbe.IsEndpointOpenAsync(uri.Host, uri.Port);
         }
 
-        if (ReservedPaths.IsReserved(entity.MatchPath, out var reason, _options.Value.ReverseProxy.AllowCatchAllRoutes))
-        {
-            vm.Warnings.Add(reason);
-        }
-        var validation = _validator.Validate(destinationUrl ?? string.Empty);
-        if (!validation.IsValid && validation.Error is not null)
-        {
-            vm.Warnings.Add(validation.Error);
-        }
+        // Exactly what would keep this route out of the live snapshot.
+        vm.Warnings.AddRange(await _builder.ValidateAsync(entity));
 
         return View(vm);
     }
@@ -341,18 +302,27 @@ public sealed class ProxyRoutesController : Controller
         return RedirectToAction(nameof(Index));
     }
 
-    private async Task ValidateAsync(ProxyRouteEditViewModel model)
+    private async Task ValidateAsync(ProxyRouteEditViewModel model, int routeId)
     {
+        await using var db = await _dbFactory.CreateDbContextAsync();
+
+        // Name has a unique index; catch the clash here rather than as a DbUpdateException.
+        if (!string.IsNullOrWhiteSpace(model.Name) &&
+            await db.ProxyRoutes.AnyAsync(r => r.Name == model.Name && r.Id != routeId))
+        {
+            ModelState.AddModelError(nameof(model.Name), "A route with this name already exists.");
+        }
+
         if (ReservedPaths.IsReserved(model.MatchPath, out var reason, _options.Value.ReverseProxy.AllowCatchAllRoutes))
         {
             ModelState.AddModelError(nameof(model.MatchPath), reason);
         }
 
+        DevService? service = null;
         var destination = NormalizeOptional(model.DestinationUrlOverride);
         if (model.DevServiceId is int sid)
         {
-            await using var db = await _dbFactory.CreateDbContextAsync();
-            var service = await db.DevServices.FirstOrDefaultAsync(s => s.Id == sid);
+            service = await db.DevServices.FirstOrDefaultAsync(s => s.Id == sid);
             if (service is null)
             {
                 ModelState.AddModelError(nameof(model.DevServiceId), "Selected service was not found.");
@@ -394,6 +364,53 @@ public sealed class ProxyRoutesController : Controller
         {
             ModelState.AddModelError(nameof(model.DevServiceId), "Either link a service or provide a destination URL override.");
         }
+
+        // With the field checks passing, build the route exactly as the live snapshot will —
+        // including YARP's own validation of hosts, authorization policy and the rest — so a
+        // route YARP would reject is refused here instead of being saved and silently skipped.
+        if (ModelState.IsValid)
+        {
+            var candidate = NewEntity(model);
+            candidate.Id = routeId;
+            candidate.DevService = service;
+            foreach (var error in await _builder.ValidateAsync(candidate))
+            {
+                ModelState.AddModelError(string.Empty, error);
+            }
+        }
+    }
+
+    private static ProxyRoute NewEntity(ProxyRouteEditViewModel model)
+    {
+        var entity = new ProxyRoute
+        {
+            Name = model.Name,
+            MatchPath = model.MatchPath,
+            PathTransformMode = model.PathTransformMode,
+        };
+        ApplyModel(entity, model);
+        return entity;
+    }
+
+    private static void ApplyModel(ProxyRoute entity, ProxyRouteEditViewModel model)
+    {
+        entity.Name = model.Name;
+        entity.Enabled = model.Enabled;
+        entity.DevServiceId = model.DevServiceId;
+        entity.DestinationUrlOverride = NormalizeOptional(model.DestinationUrlOverride);
+        entity.MatchPath = model.MatchPath;
+        entity.MatchHostsCsv = model.MatchHostsCsv;
+        entity.Order = model.Order;
+        entity.PathTransformMode = model.PathTransformMode;
+        entity.PathPrefixToRemove = model.PathPrefixToRemove;
+        entity.PathPrefixToAdd = model.PathPrefixToAdd;
+        entity.PathSet = model.PathSet;
+        entity.PreserveHostHeader = model.PreserveHostHeader;
+        entity.AutoStartService = model.AutoStartService;
+        entity.RequireHealthyDestination = model.RequireHealthyDestination;
+        entity.TimeoutSeconds = model.TimeoutSeconds;
+        entity.AuthorizationPolicy = model.AuthorizationPolicy;
+        entity.ShowOnDashboard = model.ShowOnDashboard;
     }
 
     private async Task PopulateAvailableServicesAsync(ProxyRouteEditViewModel vm)

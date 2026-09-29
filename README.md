@@ -186,7 +186,7 @@ Each forwarded request is logged straight into the target service's log stream a
 2026-05-25T09:14:02 [PRX] 127.0.0.1 <-- 200 GET /api/Catalog/items -> http://localhost:7071/ 18ms 4.2 KB
 ```
 
-> ⚠️ A bare catch-all (`/`, `/{**catch-all}`) for a SPA fallback is **disabled by default**. Enable `DevDeck:ReverseProxy:AllowCatchAllRoutes` to use one — otherwise the route is persisted but skipped (with a warning) when the proxy config is built.
+> ⚠️ A catch-all route — any match path with no literal segment, such as `/`, `/{**catch-all}` or `/{**path}` — for a SPA fallback is **disabled by default**. Enable `DevDeck:ReverseProxy:AllowCatchAllRoutes` to use one — otherwise the route is persisted but skipped (with a warning) when the proxy config is built.
 
 ---
 
@@ -287,7 +287,7 @@ Settings live in `DevDeck.Web/appsettings.json` under the `DevDeck` section:
 | `LogRetentionDays` | `14` | Age after which on-disk log files are pruned. |
 | `ReverseProxy.GatewayBaseUrl` | `http://localhost:5050` | The single origin DevDeck (and the gateway) bind to. |
 | `ReverseProxy.AllowExternalDestinations` | `false` | Permit proxy destinations outside localhost/private networks. |
-| `ReverseProxy.AllowCatchAllRoutes` | `false` | Permit bare `/` and `/{**catch-all}` SPA-fallback routes. |
+| `ReverseProxy.AllowCatchAllRoutes` | `false` | Permit catch-all SPA-fallback routes (`/`, `/{**catch-all}`, or any match path with no literal segment). Reserved paths such as `/Manage` are never proxied either way. |
 | `ReverseProxy.EnableAutoStartOnRequest` | `false` | (Reserved for future) start a service when its route is first hit. |
 | `ReverseProxy.LogProxyRequests` | `true` | Log each proxied request as a `PRX` line pair — inbound request + outbound response (status, latency, size) — in the target service's log stream. |
 

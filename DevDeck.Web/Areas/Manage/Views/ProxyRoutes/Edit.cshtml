@@ -10,6 +10,7 @@
 <form method="post" asp-action="@(isNew ? "Create" : "Edit")" asp-route-id="@Model.Id">
     @Html.AntiForgeryToken()
     <div class="card card-pad">
+        <div asp-validation-summary="ModelOnly" class="field-validation-error"></div>
         <div class="form-grid">
             <label>Name</label>
             <div class="form-row"><input asp-for="Name" /><span asp-validation-for="Name" class="field-validation-error"></span></div>

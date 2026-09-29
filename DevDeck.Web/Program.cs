@@ -6,7 +6,9 @@ using DevDeck.Web.Services.Logs;
 using DevDeck.Web.Services.Portability;
 using DevDeck.Web.Services.Proxy;
 using DevDeck.Web.Services.Runtime;
+using Microsoft.AspNetCore.Routing.Matching;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Yarp.ReverseProxy.Configuration;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -47,6 +49,8 @@ builder.Services.AddSingleton<PortProbeService>();
 builder.Services.AddSingleton<ProxyDestinationValidator>();
 builder.Services.AddSingleton<ProxyRouteBuilder>();
 builder.Services.AddSingleton<ProxyRequestGuard>();
+// Keeps reserved paths (/Manage, static assets) from ever being matched by a proxy route.
+builder.Services.TryAddEnumerable(ServiceDescriptor.Singleton<MatcherPolicy, ReservedPathMatcherPolicy>());
 builder.Services.AddSingleton<ProxyRequestLogger>();
 builder.Services.AddSingleton<DevDeckProxyConfigProvider>();
 builder.Services.AddSingleton<IProxyConfigProvider>(sp => sp.GetRequiredService<DevDeckProxyConfigProvider>());

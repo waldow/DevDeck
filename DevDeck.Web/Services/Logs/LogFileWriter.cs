@@ -8,7 +8,13 @@ public sealed class LogFileWriter : IAsyncDisposable
     // entry so one chatty service's disk I/O doesn't stall every other writer (including
     // the proxy request path, which logs PRX lines through here).
     private readonly Dictionary<string, WriterEntry> _writers = new();
+
+    // Paths closed for good (finished run logs), remembered so late output can't reopen them.
+    // Bounded: only the most recent matter — a run's output readers are torn down right after
+    // its log is closed, so stragglers arrive within moments, not after hundreds more runs.
+    private const int MaxRememberedClosed = 512;
     private readonly HashSet<string> _closed = new();
+    private readonly Queue<string> _closedOrder = new();
     private readonly object _lock = new();
     private bool _disposed;
 
@@ -56,10 +62,21 @@ public sealed class LogFileWriter : IAsyncDisposable
         WriterEntry? entry;
         lock (_lock)
         {
-            if (!allowReopen) _closed.Add(filePath);
+            if (!allowReopen) RememberClosed(filePath);
             if (!_writers.Remove(filePath, out entry)) return;
         }
         DisposeEntry(entry);
+    }
+
+    // Caller holds _lock.
+    private void RememberClosed(string filePath)
+    {
+        if (!_closed.Add(filePath)) return;
+        _closedOrder.Enqueue(filePath);
+        while (_closedOrder.Count > MaxRememberedClosed)
+        {
+            _closed.Remove(_closedOrder.Dequeue());
+        }
     }
 
     public ValueTask DisposeAsync()

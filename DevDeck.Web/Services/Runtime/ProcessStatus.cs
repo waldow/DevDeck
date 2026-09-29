@@ -42,8 +42,7 @@ public static class ProcessStatusNames
 
     /// <summary>
     /// Resolves the terminal status of a run whose process has exited, given the status it held
-    /// while active. Shared by <c>DevDeckProcessManager</c> (live exit handling) and
-    /// <c>RunHistoryRefreshService</c> (post-restart reconciliation) so the two never drift.
+    /// while active (used by <c>DevDeckProcessManager</c>'s exit handling).
     /// </summary>
     public static string ResolveExitStatus(string currentStatus, int? exitCode, bool killIssued) => currentStatus switch
     {
