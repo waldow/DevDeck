@@ -10,7 +10,7 @@
 <form method="post" asp-action="@(isNew ? "Create" : "Edit")" asp-route-id="@Model.Id">
     @Html.AntiForgeryToken()
     <div class="card card-pad">
-        <div asp-validation-summary="ModelOnly" class="field-validation-error"></div>
+        <div asp-validation-summary="All"></div>
         <div class="form-grid">
             <label>Name</label>
             <div class="form-row"><input asp-for="Name" /><span asp-validation-for="Name" class="field-validation-error"></span></div>
@@ -48,10 +48,18 @@
             </div>
 
             <label>Match hosts (csv)</label>
-            <div class="form-row"><input asp-for="MatchHostsCsv" placeholder="optional, e.g. app.localhost" class="mono" /></div>
+            <div class="form-row">
+                <input asp-for="MatchHostsCsv" placeholder="optional, e.g. app.localhost" class="mono" />
+                <span asp-validation-for="MatchHostsCsv" class="field-validation-error"></span>
+                <span class="hint">Host names with an optional port (<span class="k">app.localhost</span>, <span class="k">app.localhost:5050</span>); no scheme. Names other than localhost / *.localhost must also be listed in AllowedHosts.</span>
+            </div>
 
             <label>Order</label>
-            <div class="form-row"><input asp-for="Order" type="number" /></div>
+            <div class="form-row">
+                <input asp-for="Order" type="number" />
+                <span asp-validation-for="Order" class="field-validation-error"></span>
+                <span class="hint">When two routes match a request, the lower order wins.</span>
+            </div>
 
             <label>Path transform mode</label>
             <div class="form-row">
@@ -77,10 +85,17 @@
             </div>
 
             <label>Timeout (s)</label>
-            <div class="form-row"><input asp-for="TimeoutSeconds" type="number" /></div>
+            <div class="form-row">
+                <input asp-for="TimeoutSeconds" type="number" min="1" max="600" />
+                <span asp-validation-for="TimeoutSeconds" class="field-validation-error"></span>
+            </div>
 
             <label>Authorization policy</label>
-            <div class="form-row"><input asp-for="AuthorizationPolicy" /></div>
+            <div class="form-row">
+                <input asp-for="AuthorizationPolicy" />
+                <span asp-validation-for="AuthorizationPolicy" class="field-validation-error"></span>
+                <span class="hint">Leave blank. DevDeck has no authentication, so only blank or <span class="k">Anonymous</span> can work.</span>
+            </div>
         </div>
     </div>
 

@@ -12,6 +12,10 @@ public sealed class DevDeckProxyConfigProvider : IProxyConfigProvider
     private readonly ILogger<DevDeckProxyConfigProvider> _logger;
     private volatile Snapshot _snapshot;
 
+    // Reloads read the database and then publish; serialized so a reload that read older rows
+    // can never publish after (and so overwrite) one that read newer rows.
+    private readonly SemaphoreSlim _reloadGate = new(1, 1);
+
     public DevDeckProxyConfigProvider(
         IDbContextFactory<DevDeckDbContext> dbFactory,
         ProxyRouteBuilder builder,
@@ -29,6 +33,7 @@ public sealed class DevDeckProxyConfigProvider : IProxyConfigProvider
 
     public async Task ReloadAsync(CancellationToken cancellationToken = default)
     {
+        await _reloadGate.WaitAsync(CancellationToken.None);
         try
         {
             await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
@@ -46,6 +51,10 @@ public sealed class DevDeckProxyConfigProvider : IProxyConfigProvider
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to reload proxy config");
+        }
+        finally
+        {
+            _reloadGate.Release();
         }
     }
 

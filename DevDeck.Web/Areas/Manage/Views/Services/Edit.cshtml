@@ -7,11 +7,14 @@
     var presets = (ViewBag.Presets as IReadOnlyList<CommandPreset>) ?? new List<CommandPreset>();
     var isRunning = ViewBag.IsRunning as bool? == true;
     var portWarning = ViewBag.PortWarning as string;
+    // A type that isn't a preset (e.g. from an import) must stay selectable, or the browser
+    // would submit the first preset in its place.
+    var isPresetType = presets.Any(p => string.Equals(p.Key, Model.ServiceType, StringComparison.OrdinalIgnoreCase));
 }
 
 @if (isRunning)
 {
-    <div class="flash info">This service is currently running. Changes will apply after restart.</div>
+    <div class="flash info">This service is currently running. Command, arguments, working directory and environment changes apply on the next restart. Port and URL changes re-point the proxy and health checks as soon as you save, so restart the service too if DevDeck passes <span class="k">{port}</span> to it.</div>
 }
 @if (!string.IsNullOrEmpty(portWarning))
 {
@@ -20,6 +23,7 @@
 
 <form method="post" asp-action="@(isNew ? "Create" : "Edit")" asp-route-id="@Model.Id">
     @Html.AntiForgeryToken()
+    <div asp-validation-summary="All"></div>
     <div class="card card-pad">
         <div class="form-grid">
             <label for="Name">Name</label>
@@ -31,8 +35,13 @@
             <label for="ServiceType">Type</label>
             <div class="form-row">
                 <select asp-for="ServiceType">
+                    @if (!isPresetType && !string.IsNullOrWhiteSpace(Model.ServiceType))
+                    {
+                        <option value="@Model.ServiceType">@Model.ServiceType</option>
+                    }
                     @foreach (var p in presets) { <option value="@p.Key">@p.DisplayName</option> }
                 </select>
+                <span asp-validation-for="ServiceType" class="field-validation-error"></span>
             </div>
 
             <label for="WorkingDirectory">Working directory</label>
@@ -45,17 +54,30 @@
             <label for="StartCommand">Start command</label>
             <div class="form-row">
                 <input asp-for="StartCommand" class="mono" />
-                <span class="hint">Executable name (will resolve <span class="k">npm</span>/<span class="k">npm.cmd</span> per OS) or absolute path.</span>
+                <span asp-validation-for="StartCommand" class="field-validation-error"></span>
+                <span class="hint">Executable name (will resolve <span class="k">npm</span>/<span class="k">npm.cmd</span> per OS), a path relative to the working directory (<span class="k">./run.sh</span>), or an absolute path.</span>
             </div>
 
             <label for="StartArguments">Start arguments</label>
             <div class="form-row">
                 <input asp-for="StartArguments" class="mono" />
-                <span class="hint">Placeholders: <span class="k">{port}</span> <span class="k">{name}</span> <span class="k">{id}</span> <span class="k">{workingDirectory}</span></span>
+                <span class="hint">Placeholders: <span class="k">{port}</span> <span class="k">{name}</span> <span class="k">{id}</span> <span class="k">{workingDirectory}</span> (values with spaces are quoted for you)</span>
             </div>
 
+            <label for="StopCommand">Stop command</label>
+            <div class="form-row">
+                <input asp-for="StopCommand" class="mono" placeholder="optional, e.g. docker" />
+                <span class="hint">Optional. Run in the working directory when the service is stopped, before DevDeck signals the process — for tools whose own shutdown needs a command (e.g. <span class="k">docker</span> <span class="k">compose stop</span>).</span>
+            </div>
+
+            <label for="StopArguments">Stop arguments</label>
+            <div class="form-row"><input asp-for="StopArguments" class="mono" /></div>
+
             <label for="Port">Port</label>
-            <div class="form-row"><input asp-for="Port" type="number" /></div>
+            <div class="form-row">
+                <input asp-for="Port" type="number" min="1" max="65535" />
+                <span asp-validation-for="Port" class="field-validation-error"></span>
+            </div>
 
             <label for="Url">URL</label>
             <div class="form-row">
@@ -79,11 +101,15 @@
             <label for="ExternalPort">External port</label>
             <div class="form-row">
                 <input asp-for="ExternalPort" type="number" placeholder="7071" />
+                <span asp-validation-for="ExternalPort" class="field-validation-error"></span>
                 <span class="hint">Port of the externally-running instance. Defaults to the dev port (7071 for Azure Functions).</span>
             </div>
 
             <label for="DisplayOrder">Display order</label>
-            <div class="form-row"><input asp-for="DisplayOrder" type="number" /></div>
+            <div class="form-row">
+                <input asp-for="DisplayOrder" type="number" min="0" />
+                <span asp-validation-for="DisplayOrder" class="field-validation-error"></span>
+            </div>
         </div>
     </div>
 
@@ -97,7 +123,8 @@
                     @for (var i = 0; i < Model.EnvironmentVariables.Count; i++)
                     {
                         var prefix = $"EnvironmentVariables[{i}]";
-                        <tr class="repeat-row">
+                        var removed = Model.EnvironmentVariables[i].Delete;
+                        <tr class="repeat-row @(removed ? "row-removed" : "")">
                             <td><input name="@(prefix).Id" type="hidden" value="@Model.EnvironmentVariables[i].Id" /><input name="@(prefix).Key" value="@Model.EnvironmentVariables[i].Key" class="mono" /></td>
                             <td class="cell-value">
                                 <input name="@(prefix).Value" value="@Model.EnvironmentVariables[i].Value" class="mono js-value" type="@(Model.EnvironmentVariables[i].IsSecret ? "password" : "text")" autocomplete="off" />
@@ -105,7 +132,7 @@
                             </td>
                             <td><input name="@(prefix).IsSecret" type="checkbox" value="true" @(Model.EnvironmentVariables[i].IsSecret ? "checked" : "")><input name="@(prefix).IsSecret" type="hidden" value="false" /></td>
                             <td class="cell-actions">
-                                <input name="@(prefix).Delete" type="hidden" value="false" class="js-delete-flag" />
+                                <input name="@(prefix).Delete" type="hidden" value="@(removed ? "true" : "false")" class="js-delete-flag" />
                                 <button type="button" class="icon-btn danger js-remove" title="Remove variable" aria-label="Remove variable">✕</button>
                             </td>
                         </tr>
@@ -125,13 +152,14 @@
                     @for (var i = 0; i < Model.HealthChecks.Count; i++)
                     {
                         var prefix = $"HealthChecks[{i}]";
-                        <tr class="repeat-row">
+                        var removed = Model.HealthChecks[i].Delete;
+                        <tr class="repeat-row @(removed ? "row-removed" : "")">
                             <td><input name="@(prefix).Id" type="hidden" value="@Model.HealthChecks[i].Id" /><input name="@(prefix).Url" value="@Model.HealthChecks[i].Url" class="mono" /></td>
                             <td><input name="@(prefix).ExpectedStatusCode" value="@Model.HealthChecks[i].ExpectedStatusCode" type="number" /></td>
                             <td><input name="@(prefix).IntervalSeconds" value="@Model.HealthChecks[i].IntervalSeconds" type="number" /></td>
                             <td><input name="@(prefix).Enabled" type="checkbox" value="true" @(Model.HealthChecks[i].Enabled ? "checked" : "")><input name="@(prefix).Enabled" type="hidden" value="false" /></td>
                             <td class="cell-actions">
-                                <input name="@(prefix).Delete" type="hidden" value="false" class="js-delete-flag" />
+                                <input name="@(prefix).Delete" type="hidden" value="@(removed ? "true" : "false")" class="js-delete-flag" />
                                 <button type="button" class="icon-btn danger js-remove" title="Remove health check" aria-label="Remove health check">✕</button>
                             </td>
                         </tr>

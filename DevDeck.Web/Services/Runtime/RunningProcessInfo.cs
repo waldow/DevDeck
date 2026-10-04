@@ -14,4 +14,13 @@ public sealed class RunningProcessInfo
     public bool KillIssued { get; set; }
     public int? Port { get; init; }
     public string? Url { get; init; }
+
+    /// <summary>
+    /// Re-attached at startup: a process an earlier DevDeck session launched and left running.
+    /// DevDeck can stop it and sees it exit, but no longer has its output or exit code.
+    /// </summary>
+    public bool IsAdopted { get; init; }
+
+    /// <summary>Unix: the process group the service runs in when it has one of its own (started via setsid).</summary>
+    public int? ProcessGroup { get; set; }
 }

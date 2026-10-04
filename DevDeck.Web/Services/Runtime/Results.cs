@@ -16,6 +16,8 @@ public sealed class StopServiceResult
     public long? RunId { get; init; }
     public string? Message { get; init; }
     public string? Error { get; init; }
+    /// <summary>Nothing of the service was running (not a failure for Stop all).</summary>
+    public bool NothingToStop { get; init; }
 }
 
 public sealed class RestartServiceResult
@@ -51,5 +53,7 @@ public sealed class ServiceActionOutcome
     public int ServiceId { get; init; }
     public string ServiceName { get; init; } = string.Empty;
     public bool Success { get; init; }
+    /// <summary>Nothing needed doing (already running, passthru, disabled): not a failure.</summary>
+    public bool Skipped { get; init; }
     public string? Message { get; init; }
 }

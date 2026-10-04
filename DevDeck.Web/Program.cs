@@ -11,6 +11,13 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Yarp.ReverseProxy.Configuration;
 
+// Helper mode (Windows): raise Ctrl+C on a service's console so it can shut down gracefully;
+// see WindowsConsoleSignal. Runs before anything else and exits.
+if (WindowsConsoleSignal.IsHelperInvocation(args))
+{
+    return WindowsConsoleSignal.RunHelper(args);
+}
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Kestrel binding — DevDeck gateway listens on the configured gateway URL.
@@ -20,16 +27,27 @@ builder.WebHost.UseUrls(listenUrl);
 builder.Services.Configure<DevDeckOptions>(builder.Configuration.GetSection(DevDeckOptions.SectionName));
 
 // StopServicesOnShutdown stops services concurrently, each taking up to StopTimeoutSeconds
-// plus the 5s kill fallback and exit finalization; give the host long enough for that.
+// for its stop command and about as long again for the process to exit, plus the 5s kill
+// fallback and exit finalization; give the host long enough for that.
 var shutdownOptions = builder.Configuration.GetSection(DevDeckOptions.SectionName).Get<DevDeckOptions>() ?? new DevDeckOptions();
 if (shutdownOptions.StopServicesOnShutdown)
 {
     builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(
-        Math.Max(o.ShutdownTimeout.TotalSeconds, Math.Max(1, shutdownOptions.StopTimeoutSeconds) + 15)));
+        Math.Max(o.ShutdownTimeout.TotalSeconds, 2 * Math.Max(1, shutdownOptions.StopTimeoutSeconds) + 15)));
 }
 
-builder.Services.AddControllersWithViews();
+// Blank rows in the service editor (an env var or health check added and left empty, or
+// removed with ✕) bind as null; the controller skips them, so don't let nullable reference
+// types turn every non-nullable string on a row into an implicit [Required].
+builder.Services.AddControllersWithViews(o => o.SuppressImplicitRequiredAttributeForNonNullableReferenceTypes = true);
 builder.Services.AddAuthorization();
+
+// DevDeck has no authentication, so it must only answer requests addressed to its own host
+// names (AllowedHosts) — otherwise a DNS-rebinding page could drive the Manage UI from the
+// developer's browser. The loopback names and a concrete gateway host are always allowed.
+builder.Services.PostConfigure<Microsoft.AspNetCore.HostFiltering.HostFilteringOptions>(
+    o => AllowedHostsPolicy.IncludeDevDeckHosts(o, listenUrl));
+builder.Services.AddSingleton<AllowedHostsPolicy>();
 builder.Services.AddHttpClient();
 
 builder.Services.AddDbContextFactory<DevDeckDbContext>(options =>
@@ -73,6 +91,15 @@ if (!GatewayUrlResolver.IsLoopbackHost(listenUrl))
         listenUrl);
 }
 
+var allowedHosts = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<Microsoft.AspNetCore.HostFiltering.HostFilteringOptions>>().Value.AllowedHosts;
+if (allowedHosts.Contains("*"))
+{
+    app.Logger.LogWarning(
+        "AllowedHosts is '*', so DevDeck answers requests for any host name. DevDeck has no authentication: " +
+        "a web page whose host name re-resolves to this machine (DNS rebinding) could then drive it. " +
+        "List the host names you use instead, e.g. \"localhost;*.localhost;127.0.0.1;[::1]\".");
+}
+
 try
 {
     using var scope = app.Services.CreateScope();
@@ -90,6 +117,24 @@ catch (Exception ex)
         "Fix the file's permissions or delete it (configuration will be lost) and restart.",
         DevDeckPaths.DatabaseFile);
     throw;
+}
+
+// Services an earlier DevDeck session left running (it was killed or crashed, or
+// StopServicesOnShutdown is off) are re-attached, so they show as running, are proxied to and
+// can be stopped, instead of being launched a second time; runs whose process has died since
+// are closed out.
+try
+{
+    var adopted = await app.Services.GetRequiredService<DevDeckProcessManager>().AdoptOrphanedRunsAsync();
+    await app.Services.GetRequiredService<RunHistoryRefreshService>().RefreshActiveRunsAsync();
+    if (adopted > 0)
+    {
+        app.Logger.LogInformation("Re-attached {Count} service(s) left running by an earlier DevDeck session", adopted);
+    }
+}
+catch (Exception ex)
+{
+    app.Logger.LogWarning(ex, "Could not reconcile services left running by an earlier DevDeck session");
 }
 
 app.UseStaticFiles();
@@ -144,64 +189,103 @@ if (devDeckOptions.ReverseProxy.Enabled)
 app.MapGet("/", () => Results.Redirect("/Manage")).WithOrder(int.MaxValue);
 
 app.Run();
+return 0;
 
-internal sealed class AutoStartHostedService : IHostedService
+// Starts the enabled AutoStart services once DevDeck is listening. Not from StartAsync: the web
+// server only starts after every hosted service's StartAsync has returned, so a slow start
+// (Azurite coming up for a Functions host) would keep the dashboard and gateway offline, and a
+// second DevDeck instance would launch duplicates before failing to bind its port.
+internal sealed class AutoStartHostedService : BackgroundService
 {
     private readonly IServiceProvider _services;
+    private readonly IHostApplicationLifetime _lifetime;
     private readonly Microsoft.Extensions.Options.IOptions<DevDeckOptions> _options;
     private readonly ILogger<AutoStartHostedService> _logger;
 
     public AutoStartHostedService(
         IServiceProvider services,
+        IHostApplicationLifetime lifetime,
         Microsoft.Extensions.Options.IOptions<DevDeckOptions> options,
         ILogger<AutoStartHostedService> logger)
     {
         _services = services;
+        _lifetime = lifetime;
         _options = options;
         _logger = logger;
     }
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (!_options.Value.AutoStartEnabledServices) return;
 
-        try
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using (_lifetime.ApplicationStarted.Register(() => started.TrySetResult()))
+        using (stoppingToken.Register(() => started.TrySetCanceled()))
         {
-            using var scope = _services.CreateScope();
-            var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DevDeckDbContext>>();
-            var manager = scope.ServiceProvider.GetRequiredService<IDevDeckProcessManager>();
-            await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-            var ids = await db.DevServices
-                .Where(s => s.Enabled && s.AutoStart && !s.UseExternalInstance)
-                .OrderBy(s => s.DisplayOrder)
-                .Select(s => s.Id)
-                .ToListAsync(cancellationToken);
-
-            foreach (var id in ids)
+            try
             {
-                await manager.StartServiceAsync(id, cancellationToken);
+                await started.Task;
+            }
+            catch (OperationCanceledException)
+            {
+                return;
             }
         }
-        catch (Exception ex)
+
+        List<(int Id, string Name)> services;
+        try
+        {
+            var dbFactory = _services.GetRequiredService<IDbContextFactory<DevDeckDbContext>>();
+            await using var db = await dbFactory.CreateDbContextAsync(stoppingToken);
+            services = await db.DevServices
+                .Where(s => s.Enabled && s.AutoStart && !s.UseExternalInstance)
+                .OrderBy(s => s.DisplayOrder)
+                .Select(s => new ValueTuple<int, string>(s.Id, s.Name))
+                .ToListAsync(stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Auto-start of enabled services failed");
+            return;
+        }
+
+        var manager = _services.GetRequiredService<IDevDeckProcessManager>();
+        foreach (var (id, name) in services)
+        {
+            if (stoppingToken.IsCancellationRequested || _lifetime.ApplicationStopping.IsCancellationRequested) return;
+            if (manager.GetRunningProcess(id) is not null) continue; // e.g. re-attached from an earlier session
+
+            // One failure must not cost the rest their start.
+            try
+            {
+                var result = await manager.StartServiceAsync(id, stoppingToken);
+                if (!result.Success)
+                {
+                    _logger.LogWarning("Auto-start of {ServiceName} failed: {Error}", name, result.Error);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Auto-start of {ServiceName} failed", name);
+            }
         }
     }
-
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }
 
-// Opt-in (DevDeck:StopServicesOnShutdown): stop all managed services when DevDeck shuts
-// down. Default keeps today's behavior — children keep running and are reconciled as
-// orphaned runs on the next start.
-internal sealed class StopServicesOnShutdownHostedService : IHostedService
+// DevDeck:StopServicesOnShutdown (on by default): stop all managed services when DevDeck shuts
+// down. When it is off they are left running and re-attached on the next start.
+// The stop runs in StoppingAsync, before the web server shuts down: the server first waits for
+// open connections (a proxied HMR websocket holds one until the host's shutdown timeout), and
+// that wait would otherwise use up the shared shutdown token before the services were reached.
+// Stopping the services first also ends those proxied connections.
+internal sealed class StopServicesOnShutdownHostedService : IHostedLifecycleService
 {
-    private readonly IDevDeckProcessManager _manager;
+    private readonly DevDeckProcessManager _manager;
     private readonly Microsoft.Extensions.Options.IOptions<DevDeckOptions> _options;
     private readonly ILogger<StopServicesOnShutdownHostedService> _logger;
 
     public StopServicesOnShutdownHostedService(
-        IDevDeckProcessManager manager,
+        DevDeckProcessManager manager,
         Microsoft.Extensions.Options.IOptions<DevDeckOptions> options,
         ILogger<StopServicesOnShutdownHostedService> logger)
     {
@@ -210,15 +294,22 @@ internal sealed class StopServicesOnShutdownHostedService : IHostedService
         _logger = logger;
     }
 
+    public Task StartingAsync(CancellationToken cancellationToken) => Task.CompletedTask;
     public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task StartedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
-    public async Task StopAsync(CancellationToken cancellationToken)
+    public async Task StoppingAsync(CancellationToken cancellationToken)
     {
+        // Whether or not services are stopped, nothing new is launched while DevDeck goes down
+        // (an auto-start or request in flight would otherwise start one after the Stop-all).
+        _manager.BeginShutdown();
         if (!_options.Value.StopServicesOnShutdown) return;
 
         try
         {
-            var result = await _manager.StopAllAsync(cancellationToken);
+            // The stops themselves are bounded by StopTimeoutSeconds; the host's token only
+            // limits how long shutdown waits for them.
+            var result = await _manager.StopAllAsync(CancellationToken.None).WaitAsync(cancellationToken);
             _logger.LogInformation("Stopped {Count} managed services on shutdown", result.Stopped);
         }
         catch (Exception ex)
@@ -226,4 +317,7 @@ internal sealed class StopServicesOnShutdownHostedService : IHostedService
             _logger.LogWarning(ex, "Failed to stop managed services on shutdown");
         }
     }
+
+    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task StoppedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }

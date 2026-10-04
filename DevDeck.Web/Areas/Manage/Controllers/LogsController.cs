@@ -1,7 +1,9 @@
 using DevDeck.Web.Data;
+using DevDeck.Web.Options;
 using DevDeck.Web.Services.Runtime;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace DevDeck.Web.Areas.Manage.Controllers;
 
@@ -11,11 +13,13 @@ public sealed class LogsController : Controller
 {
     private readonly IDbContextFactory<DevDeckDbContext> _dbFactory;
     private readonly IDevDeckProcessManager _manager;
+    private readonly IOptions<DevDeckOptions> _options;
 
-    public LogsController(IDbContextFactory<DevDeckDbContext> dbFactory, IDevDeckProcessManager manager)
+    public LogsController(IDbContextFactory<DevDeckDbContext> dbFactory, IDevDeckProcessManager manager, IOptions<DevDeckOptions> options)
     {
         _dbFactory = dbFactory;
         _manager = manager;
+        _options = options;
     }
 
     [HttpGet("Services/{id:int}/Logs")]
@@ -60,19 +64,23 @@ public sealed class LogsController : Controller
     {
         await using var db = await _dbFactory.CreateDbContextAsync();
         var run = await db.ServiceRuns.FirstOrDefaultAsync(r => r.Id == runId);
-        if (run is null || string.IsNullOrEmpty(run.LogFilePath))
+        if (run is null)
         {
             return NotFound();
         }
 
         // LogFilePath is system-written, but clamp it to the logs folder anyway so a
         // tampered database row can never read an arbitrary file off disk.
-        var fullPath = Path.GetFullPath(run.LogFilePath);
-        var relative = Path.GetRelativePath(DevDeckPaths.LogsFolder, fullPath);
-        if (relative.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(relative) ||
+        var fullPath = string.IsNullOrEmpty(run.LogFilePath) ? null : Path.GetFullPath(run.LogFilePath);
+        var relative = fullPath is null ? null : Path.GetRelativePath(DevDeckPaths.LogsFolder, fullPath);
+        if (fullPath is null || relative is null ||
+            relative.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(relative) ||
             !System.IO.File.Exists(fullPath))
         {
-            return NotFound();
+            // Deleted by log retention (or by hand): say so on the run's page rather than a bare 404.
+            TempData["Error"] = $"The log file of run #{run.Id} no longer exists; run logs are deleted after " +
+                                $"{_options.Value.LogRetentionDays} day(s) (DevDeck:LogRetentionDays).";
+            return RedirectToAction("Details", "Runs", new { id = run.Id });
         }
 
         // Open with FileShare.ReadWrite so a still-running service (whose LogFileWriter holds

@@ -191,7 +191,15 @@ public sealed class StartAllTests : IDisposable
 
             await using var db = _factory.CreateDbContext();
             var run = await db.ServiceRuns.SingleAsync(r => r.Id == runId);
-            run.Status.Should().Be(ProcessStatusNames.Killed);
+            // Stopped gracefully (SIGTERM) where the platform allows, like a tracked process.
+            if (OperatingSystem.IsWindows())
+            {
+                run.Status.Should().BeOneOf(ProcessStatusNames.Stopped, ProcessStatusNames.Killed);
+            }
+            else
+            {
+                run.Status.Should().Be(ProcessStatusNames.Stopped);
+            }
             run.StoppedUtc.Should().NotBeNull();
         }
         finally

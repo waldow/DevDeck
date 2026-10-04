@@ -64,8 +64,8 @@ public sealed class AzuriteSupervisorTests
     }
 
     [Theory]
-    [InlineData(false, true)]  // default: Functions hosts outlive DevDeck, so Azurite must too
-    [InlineData(true, false)]  // StopServicesOnShutdown: stopped along with the services
+    [InlineData(false, true)]  // services left running: Functions hosts outlive DevDeck, so Azurite must too
+    [InlineData(true, false)]  // StopServicesOnShutdown (the default): stopped along with the services
     public async Task DisposeAsync_stops_a_launched_azurite_only_when_services_are_stopped_on_shutdown(
         bool stopServicesOnShutdown, bool expectAlive)
     {
@@ -109,21 +109,58 @@ public sealed class AzuriteSupervisorTests
         }
     }
 
-    // A stand-in "azurite" that ignores its arguments and just stays alive.
-    private static string WriteFakeAzurite(string folder)
+    [Fact]
+    public async Task EnsureRunning_reports_an_azurite_that_dies_during_startup_without_waiting_out_the_timeout()
+    {
+        // E.g. a port already taken: Azurite logs EADDRINUSE and exits at once. That used to cost
+        // the full startup timeout and then report a generic "timed out".
+        var temp = Directory.CreateTempSubdirectory("devdeck-azurite-");
+        try
+        {
+            var options = new DevDeckOptions
+            {
+                Azurite = new AzuriteOptions
+                {
+                    Command = WriteFakeAzurite(temp.FullName, exitImmediately: true),
+                    BlobPort = FreePort(),
+                    QueuePort = FreePort(),
+                    TablePort = FreePort(),
+                    StartupTimeoutSeconds = 30,
+                },
+            };
+            var supervisor = CreateSupervisor(options);
+            var stopwatch = Stopwatch.StartNew();
+
+            var result = await supervisor.EnsureRunningAsync(_ => { }, CancellationToken.None);
+
+            stopwatch.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(10));
+            result.Success.Should().BeFalse();
+            result.Error.Should().Contain("exited during startup");
+            await supervisor.DisposeAsync();
+        }
+        finally
+        {
+            temp.Delete(recursive: true);
+        }
+    }
+
+    // A stand-in "azurite" that ignores its arguments and just stays alive (or exits at once).
+    private static string WriteFakeAzurite(string folder, bool exitImmediately)
     {
         if (OperatingSystem.IsWindows())
         {
             var cmd = Path.Combine(folder, "fake-azurite.cmd");
-            File.WriteAllText(cmd, "@echo off\r\nping -n 60 127.0.0.1 > nul\r\n");
+            File.WriteAllText(cmd, exitImmediately ? "@echo off\r\nexit /b 1\r\n" : "@echo off\r\nping -n 60 127.0.0.1 > nul\r\n");
             return cmd;
         }
 
         var script = Path.Combine(folder, "fake-azurite");
-        File.WriteAllText(script, "#!/bin/sh\nexec sleep 60\n");
+        File.WriteAllText(script, exitImmediately ? "#!/bin/sh\necho 'listen EADDRINUSE' >&2\nexit 1\n" : "#!/bin/sh\nexec sleep 60\n");
         File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         return script;
     }
+
+    private static string WriteFakeAzurite(string folder) => WriteFakeAzurite(folder, exitImmediately: false);
 
     private static bool IsAlive(int pid)
     {

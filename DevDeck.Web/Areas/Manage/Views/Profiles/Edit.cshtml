@@ -8,6 +8,7 @@
 
 <form method="post" asp-action="@(isNew ? "Create" : "Edit")" asp-route-id="@Model.Id">
     @Html.AntiForgeryToken()
+    <div asp-validation-summary="All"></div>
     <div class="card card-pad">
         <div class="form-grid">
             <label>Name</label>
@@ -25,7 +26,10 @@
             </div>
 
             <label>Display order</label>
-            <div class="form-row"><input asp-for="DisplayOrder" type="number" /></div>
+            <div class="form-row">
+                <input asp-for="DisplayOrder" type="number" min="0" />
+                <span asp-validation-for="DisplayOrder" class="field-validation-error"></span>
+            </div>
         </div>
     </div>
 

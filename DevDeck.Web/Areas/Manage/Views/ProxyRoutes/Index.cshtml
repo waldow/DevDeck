@@ -5,6 +5,7 @@
     ViewData["Crumb"] = "Reverse proxy gateway";
     var warnings = (ViewBag.Warnings as IReadOnlyList<string>) ?? new List<string>();
     var gateway = (ViewBag.GatewayBaseUrl as string ?? "http://localhost:5050").TrimEnd('/');
+    var destinations = (ViewBag.Destinations as Dictionary<int, string?>) ?? new Dictionary<int, string?>();
 }
 
 @section Actions {
@@ -48,7 +49,7 @@ else
                     <td><strong>@r.Name</strong></td>
                     <td>@if (r.Enabled) { <span class="pill pill-running">on</span> } else { <span class="pill pill-stopped">off</span> }</td>
                     <td class="mono">@r.MatchPath</td>
-                    <td class="mono dim">@(r.DestinationUrlOverride ?? r.DevService?.Url ?? "—")</td>
+                    <td class="mono dim">@(destinations.TryGetValue(r.Id, out var destination) && destination is not null ? destination : "—")</td>
                     <td class="mono">@r.PathTransformMode</td>
                     <td class="mono">@r.Order</td>
                     <td>

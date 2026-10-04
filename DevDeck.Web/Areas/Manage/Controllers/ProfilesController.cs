@@ -180,9 +180,14 @@ public sealed class ProfilesController : Controller
     public async Task<IActionResult> Start(int id, CancellationToken cancellationToken)
     {
         var result = await _manager.StartProfileAsync(id, cancellationToken);
+        var started = result.Outcomes.Count(o => o.Success && !o.Skipped);
+        var skipped = result.Outcomes.Where(o => o.Skipped).ToList();
+        var skippedNote = skipped.Count == 0
+            ? string.Empty
+            : $" Skipped {string.Join(", ", skipped.Select(o => $"{o.ServiceName} ({o.Message})"))}.";
         TempData[result.Success ? "Info" : "Error"] = result.Success
-            ? $"Started {result.Outcomes.Count(o => o.Success)}/{result.Outcomes.Count} services."
-            : $"Some services failed: {string.Join("; ", result.Outcomes.Where(o => !o.Success).Select(o => $"{o.ServiceName}: {o.Message}"))}";
+            ? $"Started {started} of {result.Outcomes.Count} services.{skippedNote}"
+            : $"Some services failed: {string.Join("; ", result.Outcomes.Where(o => !o.Success).Select(o => $"{o.ServiceName}: {o.Message}"))}.{skippedNote}";
         return RedirectToAction("Index", "Dashboard");
     }
 
@@ -232,7 +237,7 @@ public sealed class ProfilesController : Controller
 
         var result = await _importer.ImportProfilesAsync(payload, cancellationToken);
         TempData[result.HasErrors ? "Error" : "Info"] = result.ToFlashMessage();
-        TempData["ImportWarnings"] = JsonSerializer.Serialize(result.Warnings.Concat(result.Errors).ToList());
+        TempData["ImportWarnings"] = result.ToTempDataMessages();
         return RedirectToAction(nameof(Index));
     }
 
@@ -266,6 +271,17 @@ public sealed class ProfilesController : Controller
     // submit would otherwise become a LaunchProfileService row with a dangling FK.
     private async Task ValidateIncludedServicesExistAsync(DevDeckDbContext db, ProfileEditViewModel model)
     {
+        // Rows left unticked aren't saved, so their order/delay fields can't block the save.
+        for (var i = 0; i < model.Services.Count; i++)
+        {
+            if (model.Services[i].Include) continue;
+            var prefix = $"{nameof(model.Services)}[{i}].";
+            foreach (var key in ModelState.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal)).ToList())
+            {
+                ModelState.Remove(key);
+            }
+        }
+
         var includedIds = model.Services.Where(r => r.Include).Select(r => r.DevServiceId).Distinct().ToList();
         if (includedIds.Count == 0) return;
 

@@ -101,6 +101,59 @@ public sealed class CommandExecutableResolverTests
         }
     }
 
+    [Theory]
+    [InlineData("func")]
+    [InlineData("func.cmd")]
+    public void ResolveForLaunch_falls_back_to_an_exe_when_the_npm_shim_is_absent(string command)
+    {
+        // Core Tools from the MSI, winget or Chocolatey puts only func.exe on PATH.
+        var temp = Directory.CreateTempSubdirectory("devdeck-resolver-");
+        try
+        {
+            var exe = Path.Combine(temp.FullName, "func.exe");
+            File.WriteAllText(exe, "MZ");
+
+            var r = new CommandExecutableResolver(isWindows: true);
+
+            r.ResolveForLaunch(command, temp.FullName).Should().Be(Path.GetFullPath(exe));
+        }
+        finally
+        {
+            temp.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ResolveForLaunch_still_prefers_the_npm_shim_when_present()
+    {
+        var temp = Directory.CreateTempSubdirectory("devdeck-resolver-");
+        try
+        {
+            File.WriteAllText(Path.Combine(temp.FullName, "func.exe"), "MZ");
+            var cmd = Path.Combine(temp.FullName, "func.cmd");
+            File.WriteAllText(cmd, "@echo off");
+
+            var r = new CommandExecutableResolver(isWindows: true);
+
+            r.ResolveForLaunch("func", temp.FullName).Should().Be(Path.GetFullPath(cmd));
+        }
+        finally
+        {
+            temp.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ResolveForLaunch_resolves_a_relative_path_against_the_working_directory()
+    {
+        var r = new CommandExecutableResolver(isWindows: OperatingSystem.IsWindows());
+        var workingDirectory = Path.Combine(Path.GetTempPath(), "devdeck-service");
+        var relative = OperatingSystem.IsWindows() ? @".\scripts\start.cmd" : "./scripts/start.sh";
+
+        r.ResolveForLaunch(relative, pathValue: null, workingDirectory)
+            .Should().Be(Path.GetFullPath(relative, workingDirectory));
+    }
+
     [Fact]
     public void ResolveForLaunch_leaves_command_when_path_has_no_match()
     {

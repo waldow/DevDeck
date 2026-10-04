@@ -20,3 +20,25 @@ public sealed class RunsListItem
     public string? LogFilePath { get; set; }
     public TimeSpan? Duration => StoppedUtc.HasValue ? StoppedUtc - StartedUtc : null;
 }
+
+public static class RunTimeFormat
+{
+    /// <summary>"02:15:07", or "2d 02:15:07" for a run longer than a day ("hh" alone drops the days).</summary>
+    public static string Duration(TimeSpan? duration)
+    {
+        if (duration is not { } d) return "—";
+        if (d < TimeSpan.Zero) d = TimeSpan.Zero;
+        var clock = d.ToString(@"hh\:mm\:ss");
+        return d.TotalDays >= 1 ? $"{(int)d.TotalDays}d {clock}" : clock;
+    }
+
+    /// <summary>The stop time in local time; with its date when that isn't the start's date.</summary>
+    public static string Stopped(DateTimeOffset startedUtc, DateTimeOffset? stoppedUtc)
+    {
+        if (stoppedUtc is not { } stopped) return "—";
+        var local = stopped.LocalDateTime;
+        return local.Date == startedUtc.LocalDateTime.Date
+            ? local.ToString("HH:mm:ss")
+            : local.ToString("yyyy-MM-dd HH:mm:ss");
+    }
+}

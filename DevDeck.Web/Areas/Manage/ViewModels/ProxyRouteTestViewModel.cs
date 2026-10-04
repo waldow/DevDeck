@@ -16,6 +16,8 @@ public sealed class ProxyRouteTestViewModel
     public int? EffectivePort { get; set; }
     public bool ServiceRunning { get; set; }
     public string HealthStatus { get; set; } = "Unknown";
+    /// <summary>Whether the RequireHealthyDestination gate would let a request through right now.</summary>
+    public bool HealthGatePasses { get; set; } = true;
     public string ExampleProxyUrl { get; set; } = string.Empty;
     public List<string> Warnings { get; set; } = new();
 }

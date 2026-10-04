@@ -44,8 +44,8 @@ else
                     <td><a asp-action="Details" asp-route-id="@r.Id">#@r.Id</a></td>
                     <td>@r.ServiceName</td>
                     <td class="dim">@r.StartedUtc.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss")</td>
-                    <td class="dim">@(r.StoppedUtc?.LocalDateTime.ToString("HH:mm:ss") ?? "—")</td>
-                    <td class="mono">@(r.Duration?.ToString(@"hh\:mm\:ss") ?? "—")</td>
+                    <td class="dim">@RunTimeFormat.Stopped(r.StartedUtc, r.StoppedUtc)</td>
+                    <td class="mono">@RunTimeFormat.Duration(r.Duration)</td>
                     <td><span class="pill pill-@(r.Status.ToLower())">@r.Status</span></td>
                     <td class="mono">@(r.ExitCode?.ToString() ?? "—")</td>
                     <td>@if (!string.IsNullOrEmpty(r.LogFilePath)) { <a asp-area="Manage" asp-controller="Logs" asp-action="Download" asp-route-runId="@r.Id">download</a> }</td>

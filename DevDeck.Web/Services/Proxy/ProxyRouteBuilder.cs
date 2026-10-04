@@ -2,6 +2,9 @@ using System.Diagnostics.CodeAnalysis;
 using DevDeck.Web.Data.Entities;
 using DevDeck.Web.Options;
 using DevDeck.Web.Services.Commands;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.AspNetCore.Routing.Matching;
+using Microsoft.AspNetCore.Routing.Patterns;
 using Microsoft.Extensions.Options;
 using Yarp.ReverseProxy.Configuration;
 
@@ -13,71 +16,71 @@ public sealed class ProxyRouteBuilder
     private readonly CommandTemplateRenderer _renderer;
     private readonly IOptionsMonitor<DevDeckOptions>? _options;
     private readonly IConfigValidator? _yarpValidator;
+    private readonly ParameterPolicyFactory? _parameterPolicyFactory;
 
     public ProxyRouteBuilder(
         ProxyDestinationValidator validator,
         CommandTemplateRenderer? renderer = null,
         IOptionsMonitor<DevDeckOptions>? options = null,
-        IConfigValidator? yarpValidator = null)
+        IConfigValidator? yarpValidator = null,
+        ParameterPolicyFactory? parameterPolicyFactory = null)
     {
         _validator = validator;
         _renderer = renderer ?? new CommandTemplateRenderer();
         _options = options;
         _yarpValidator = yarpValidator;
+        _parameterPolicyFactory = parameterPolicyFactory;
     }
 
     /// <summary>
     /// Builds the YARP snapshot from DevDeck's own rules (reserved paths, catch-alls,
-    /// destinations). Routes that break a rule are skipped with a warning.
+    /// destinations, hosts and constraints routing can't parse, routes that would be
+    /// ambiguous with an earlier one). Routes that break a rule are skipped with a warning.
     /// </summary>
-    public ProxyBuildResult Build(IEnumerable<ProxyRoute> routes)
-    {
-        var routeConfigs = new List<RouteConfig>();
-        var clusterConfigs = new List<ClusterConfig>();
-        var warnings = new List<string>();
-
-        foreach (var route in routes.Where(r => r.Enabled).OrderBy(r => r.Order))
-        {
-            if (TryBuild(route, out var built, out var error))
-            {
-                routeConfigs.Add(built.Route);
-                clusterConfigs.Add(built.Cluster);
-            }
-            else
-            {
-                warnings.Add($"[{route.Name}] {error}");
-            }
-        }
-
-        return new ProxyBuildResult(routeConfigs, clusterConfigs, warnings);
-    }
+    public ProxyBuildResult Build(IEnumerable<ProxyRoute> routes) =>
+        // Without YARP validation nothing in the build awaits, so this completes synchronously.
+        BuildCoreAsync(routes, validateWithYarp: false).GetAwaiter().GetResult();
 
     /// <summary>
-    /// <see cref="Build"/>, then YARP's own config validation per route. YARP rejects a whole
+    /// <see cref="Build"/>, plus YARP's own config validation per route. YARP rejects a whole
     /// snapshot when any single route in it is invalid (bad template, empty host, unknown
     /// authorization policy...) — which would silently freeze every later route edit and make
     /// the initial load throw at startup — so invalid routes are dropped here, with a warning.
     /// </summary>
-    public async Task<ProxyBuildResult> BuildAsync(IEnumerable<ProxyRoute> routes)
-    {
-        var build = Build(routes);
-        if (_yarpValidator is null)
-        {
-            return build;
-        }
+    public Task<ProxyBuildResult> BuildAsync(IEnumerable<ProxyRoute> routes) =>
+        BuildCoreAsync(routes, validateWithYarp: _yarpValidator is not null);
 
+    private async Task<ProxyBuildResult> BuildCoreAsync(IEnumerable<ProxyRoute> routes, bool validateWithYarp)
+    {
         var routeConfigs = new List<RouteConfig>();
         var clusterConfigs = new List<ClusterConfig>();
-        var warnings = build.Warnings.ToList();
-        for (var i = 0; i < build.Routes.Count; i++)
+        var warnings = new List<string>();
+        var included = new List<ProxyRoute>();
+
+        foreach (var route in routes.Where(r => r.Enabled).OrderBy(r => r.Order).ThenBy(r => r.Id))
         {
-            var built = new BuiltRoute(build.Routes[i], build.Clusters[i]);
-            var errors = await ValidateWithYarpAsync(built);
-            if (errors.Count > 0)
+            if (!TryBuild(route, out var built, out var error))
             {
-                warnings.Add($"[{RouteName(built.Route)}] {string.Join(" ", errors)}");
+                warnings.Add($"[{route.Name}] {error}");
                 continue;
             }
+
+            if (validateWithYarp && await ValidateWithYarpAsync(built) is { Count: > 0 } yarpErrors)
+            {
+                warnings.Add($"[{route.Name}] {string.Join(" ", yarpErrors)}");
+                continue;
+            }
+
+            // Two routes endpoint routing can't tell apart turn every request they match into
+            // a 500, so keep the older one and skip the other. Only routes that made it into the
+            // snapshot count: one dropped above must not shadow a valid duplicate.
+            if (ProxyRouteConflicts.FindConflict(route, included) is { } conflict)
+            {
+                warnings.Add($"[{route.Name}] Skipped: {ProxyRouteConflicts.Describe(conflict)}");
+                continue;
+            }
+
+            included.Add(route);
             routeConfigs.Add(built.Route);
             clusterConfigs.Add(built.Cluster);
         }
@@ -114,6 +117,34 @@ public sealed class ProxyRouteBuilder
             return false;
         }
 
+        // Hosts and constraints are only checked by routing when it builds its matcher, which
+        // is shared by every endpoint: one it can't build breaks all routing, /Manage included.
+        if (ValidateMatchHosts(route.MatchHostsCsv) is { } hostError)
+        {
+            error = hostError;
+            return false;
+        }
+        if (ValidateConstraints(route.MatchPath) is { } constraintError)
+        {
+            error = constraintError;
+            return false;
+        }
+
+        // "Default" requires an authenticated user, but DevDeck registers no authentication
+        // scheme, so the challenge would throw and every request to the route would get a 500.
+        if (string.Equals(route.AuthorizationPolicy?.Trim(), "Default", StringComparison.OrdinalIgnoreCase))
+        {
+            error = "Authorization policy 'Default' requires an authenticated user, but DevDeck has no authentication, " +
+                    "so every request would fail. Leave the policy blank (or use 'Anonymous').";
+            return false;
+        }
+
+        if (route.TimeoutSeconds is <= 0)
+        {
+            error = "Timeout must be at least 1 second (leave it blank for YARP's default).";
+            return false;
+        }
+
         var destination = ResolveDestination(route);
         if (string.IsNullOrWhiteSpace(destination.Url))
         {
@@ -140,6 +171,13 @@ public sealed class ProxyRouteBuilder
             return false;
         }
 
+        if (destinationUri is not null && PointsAtGateway(destinationUri))
+        {
+            error = $"Destination {destinationUri.GetLeftPart(UriPartial.Authority)} is the DevDeck gateway itself, " +
+                    "so each request would be proxied back into the gateway in a loop.";
+            return false;
+        }
+
         var clusterId = $"cluster-{route.Id}";
         var routeId = $"route-{route.Id}";
 
@@ -154,6 +192,9 @@ public sealed class ProxyRouteBuilder
                 Hosts = ParseHosts(route.MatchHostsCsv),
             },
             Transforms = BuildTransforms(route),
+            // No gateway-side body limit (Kestrel's default is 30 MB): an upload the service itself
+            // accepts must not fail only when it goes through the gateway. The service enforces its own.
+            MaxRequestBodySize = -1,
             AuthorizationPolicy = string.IsNullOrWhiteSpace(route.AuthorizationPolicy) ? null : route.AuthorizationPolicy.Trim(),
             Metadata = BuildMetadata(route, destinationHost, destinationPort),
         };
@@ -251,9 +292,99 @@ public sealed class ProxyRouteBuilder
 
     private static IReadOnlyList<string>? ParseHosts(string? hostsCsv)
     {
-        if (string.IsNullOrWhiteSpace(hostsCsv)) return null;
-        var parts = hostsCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        return parts.Length == 0 ? null : parts;
+        var parts = ProxyRouteConflicts.ParseHosts(hostsCsv);
+        return parts.Count == 0 ? null : parts;
+    }
+
+    /// <summary>
+    /// Runs the hosts through the framework's own HostMatcherPolicy, the component that would
+    /// otherwise reject them while building the shared endpoint matcher. It accepts "host",
+    /// "host:port" and "host:*" — not a URL ("http://localhost:5050") or a bracketed IPv6
+    /// literal ("[::1]").
+    /// </summary>
+    internal static string? ValidateMatchHosts(string? hostsCsv)
+    {
+        var hosts = ProxyRouteConflicts.ParseHosts(hostsCsv);
+        INodeBuilderPolicy policy = new HostMatcherPolicy();
+        foreach (var host in hosts)
+        {
+            // A pasted URL with a path parses as a host routing will simply never match.
+            var valid = host.IndexOf('/') < 0;
+            if (valid)
+            {
+                var endpoint = new Endpoint(_ => Task.CompletedTask, new EndpointMetadataCollection(new HostAttribute(host)), host);
+                try
+                {
+                    policy.GetEdges([endpoint]);
+                }
+                catch (InvalidOperationException)
+                {
+                    valid = false;
+                }
+            }
+
+            if (!valid)
+            {
+                return $"Match host '{host}' is not valid: use a host name with an optional port, " +
+                       "like 'app.localhost' or 'app.localhost:5050' (no scheme or path).";
+            }
+        }
+
+        return null;
+    }
+
+    // Constraints are resolved by name ("{id:int}") only when routing builds its matcher; an
+    // unknown name or bad argument ("{id:integer}", "{id:length(abc)}") would throw there.
+    private string? ValidateConstraints(string matchPath)
+    {
+        if (_parameterPolicyFactory is null)
+        {
+            return null;
+        }
+
+        RoutePattern pattern;
+        try
+        {
+            pattern = RoutePatternFactory.Parse(matchPath.Trim());
+        }
+        catch (RoutePatternException ex)
+        {
+            return $"Match path is not a valid route template: {ex.Message}";
+        }
+
+        foreach (var parameter in pattern.Parameters)
+        {
+            foreach (var reference in parameter.ParameterPolicies)
+            {
+                try
+                {
+                    _parameterPolicyFactory.Create(parameter, reference);
+                }
+                catch (Exception ex)
+                {
+                    return $"Match path constraint '{reference.Content}' on '{{{parameter.Name}}}' is not valid: {ex.Message}";
+                }
+            }
+        }
+
+        return null;
+    }
+
+    // A loopback destination on the gateway's own port is the gateway: forwarding to it would
+    // match the same route again, endlessly.
+    private bool PointsAtGateway(Uri destination)
+    {
+        var configured = _options?.CurrentValue.ReverseProxy.GatewayBaseUrl;
+        if (string.IsNullOrWhiteSpace(configured) ||
+            !Uri.TryCreate(GatewayUrlResolver.Normalize(configured), UriKind.Absolute, out var gateway) ||
+            destination.Port != gateway.Port)
+        {
+            return false;
+        }
+
+        var gatewayListensLocally = ProxyDestinationValidator.IsLocalHost(gateway.Host) || GatewayUrlResolver.IsAnyAddress(gateway.Host);
+        return string.Equals(destination.Host, gateway.Host, StringComparison.OrdinalIgnoreCase) ||
+               (ProxyDestinationValidator.IsLocalHost(destination.Host) && gatewayListensLocally);
     }
 
     private static string NormalizeDestination(string url)

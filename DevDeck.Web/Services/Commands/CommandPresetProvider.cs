@@ -70,7 +70,10 @@ public sealed class CommandPresetProvider
                 StartArguments: "compose up",
                 DefaultPort: null,
                 UrlTemplate: null,
-                HealthCheckUrlTemplate: null
+                HealthCheckUrlTemplate: null,
+                // Stopping the attached `compose up` client alone can leave the containers running.
+                StopCommand: _resolver.Resolve("docker"),
+                StopArguments: "compose stop"
             ),
             new CommandPreset(
                 Key: "Custom",
@@ -96,4 +99,6 @@ public sealed record CommandPreset(
     int? DefaultPort,
     string? UrlTemplate,
     string? HealthCheckUrlTemplate,
-    IReadOnlyCollection<KeyValuePair<string, string>>? DefaultEnvironment = null);
+    IReadOnlyCollection<KeyValuePair<string, string>>? DefaultEnvironment = null,
+    string? StopCommand = null,
+    string? StopArguments = null);

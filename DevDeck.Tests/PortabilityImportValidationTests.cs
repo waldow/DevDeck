@@ -206,6 +206,158 @@ public sealed class PortabilityImportValidationTests : IDisposable
         result.Updated.Should().Be(1);
     }
 
+    [Fact]
+    public async Task Services_in_one_file_whose_names_differ_only_by_case_stay_separate()
+    {
+        // Regression: the case-insensitive fallback matched the row created moments earlier for
+        // the other entry, merging both services (secrets included) into one row.
+        var result = await new PortabilityImporter(_factory).ImportServicesAsync(ServicesJson(
+            new PortableService { Name = "API", ServiceType = "NodeApi", WorkingDirectory = "/tmp/upper", StartCommand = "npm", Port = 1111 },
+            new PortableService { Name = "api", ServiceType = "NodeApi", WorkingDirectory = "/tmp/lower", StartCommand = "npm", Port = 2222 }));
+
+        result.Created.Should().Be(2);
+        await using var db = _factory.CreateDbContext();
+        (await db.DevServices.SingleAsync(s => s.Name == "API")).Port.Should().Be(1111);
+        (await db.DevServices.SingleAsync(s => s.Name == "api")).Port.Should().Be(2222);
+    }
+
+    [Fact]
+    public async Task A_case_insensitive_match_is_not_used_when_the_file_names_the_exact_row_too()
+    {
+        await SeedServiceAsync("Api", url: null);
+
+        var result = await new PortabilityImporter(_factory).ImportServicesAsync(ServicesJson(
+            new PortableService { Name = "API", ServiceType = "NodeApi", WorkingDirectory = "/tmp", StartCommand = "npm", Port = 1111 },
+            new PortableService { Name = "Api", ServiceType = "NodeApi", WorkingDirectory = "/tmp", StartCommand = "npm", Port = 2222 }));
+
+        result.Created.Should().Be(1);
+        result.Updated.Should().Be(1);
+        await using var db = _factory.CreateDbContext();
+        (await db.DevServices.SingleAsync(s => s.Name == "Api")).Port.Should().Be(2222);
+        (await db.DevServices.SingleAsync(s => s.Name == "API")).Port.Should().Be(1111);
+    }
+
+    [Fact]
+    public async Task A_profile_listing_a_service_twice_imports_it_once()
+    {
+        await SeedServiceAsync("api", url: null);
+        var json = """
+        { "schemaVersion": 1, "profiles": [ { "name": "Dev", "services": [
+            { "serviceName": "api", "startOrder": 1 }, { "serviceName": "api", "startOrder": 2 } ] } ] }
+        """;
+
+        var result = await new PortabilityImporter(_factory).ImportProfilesAsync(json);
+
+        result.Errors.Should().BeEmpty();
+        await using var db = _factory.CreateDbContext();
+        (await db.LaunchProfileServices.SingleAsync()).StartOrder.Should().Be(2);
+    }
+
+    [Theory]
+    [InlineData("""{ "schemaVersion": 1, "services": null }""", "services")]
+    [InlineData("""{ "schemaVersion": 1, "services": [ null ] }""", "services")]
+    [InlineData("""{ "schemaVersion": 1, "services": [ { "name": "a", "serviceType": "NodeApi", "workingDirectory": "/tmp", "startCommand": "npm", "environmentVariables": null, "healthChecks": [ null ] } ] }""", "services")]
+    [InlineData("""{ "schemaVersion": 1, "profiles": [ { "name": "p", "services": null } ] }""", "profiles")]
+    [InlineData("""{ "schemaVersion": 1, "routes": [ null ] }""", "routes")]
+    [InlineData("null", "routes")]
+    public async Task Explicit_nulls_are_reported_not_thrown(string json, string kind)
+    {
+        var importer = new PortabilityImporter(_factory);
+
+        var act = kind switch
+        {
+            "services" => importer.ImportServicesAsync(json),
+            "profiles" => importer.ImportProfilesAsync(json),
+            _ => importer.ImportRoutesAsync(json),
+        };
+
+        await act; // must not throw
+    }
+
+    [Theory]
+    [InlineData("\"port\": 70000")]
+    [InlineData("\"externalPort\": 0")]
+    [InlineData("\"displayOrder\": -1")]
+    [InlineData("\"healthChecks\": [ { \"url\": \"http://localhost:1/\", \"intervalSeconds\": 0 } ]")]
+    [InlineData("\"healthChecks\": [ { \"url\": \"http://localhost:1/\", \"expectedStatusCode\": 0 } ]")]
+    [InlineData("\"environmentVariables\": [ { \"key\": \"A=B\", \"value\": \"x\" } ]")]
+    public async Task Services_with_values_the_editor_refuses_are_skipped(string field)
+    {
+        var json = $$"""
+        { "schemaVersion": 1, "services": [ { "name": "api", "serviceType": "NodeApi", "workingDirectory": "/tmp", "startCommand": "npm", {{field}} } ] }
+        """;
+
+        var result = await new PortabilityImporter(_factory).ImportServicesAsync(json);
+
+        result.Created.Should().Be(0);
+        result.Errors.Should().ContainSingle().Which.Should().StartWith("Skipped service 'api'");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-5)]
+    [InlineData(900)]
+    public async Task Routes_with_a_timeout_the_editor_refuses_are_skipped(int timeout)
+    {
+        var json = $$"""
+        { "schemaVersion": 1, "routes": [ { "name": "r", "matchPath": "/r/{**rest}", "destinationUrlOverride": "http://localhost:3001/", "timeoutSeconds": {{timeout}} } ] }
+        """;
+
+        var result = await new PortabilityImporter(_factory).ImportRoutesAsync(json);
+
+        result.Created.Should().Be(0);
+        result.Errors.Should().ContainSingle().Which.Should().Contain("Timeout");
+    }
+
+    [Fact]
+    public async Task A_route_routing_could_not_tell_apart_from_another_is_skipped()
+    {
+        var json = """
+        { "schemaVersion": 1, "routes": [
+            { "name": "a", "matchPath": "/api/{**rest}", "destinationUrlOverride": "http://localhost:3001/" },
+            { "name": "b", "matchPath": "/api/{**path}", "destinationUrlOverride": "http://localhost:3002/" } ] }
+        """;
+
+        var result = await new PortabilityImporter(_factory).ImportRoutesAsync(json);
+
+        result.Created.Should().Be(1);
+        result.Errors.Should().ContainSingle().Which.Should().Contain("Skipped route 'b'").And.Contain("'a'");
+    }
+
+    [Fact]
+    public async Task Reimporting_a_route_does_not_conflict_with_itself()
+    {
+        var json = """
+        { "schemaVersion": 1, "routes": [ { "name": "a", "matchPath": "/api/{**rest}", "destinationUrlOverride": "http://localhost:3001/" } ] }
+        """;
+        var importer = new PortabilityImporter(_factory);
+        await importer.ImportRoutesAsync(json);
+
+        var result = await importer.ImportRoutesAsync(json);
+
+        result.Errors.Should().BeEmpty();
+        result.Updated.Should().Be(1);
+    }
+
+    [Fact]
+    public void Messages_kept_for_the_next_page_are_capped()
+    {
+        // They travel in a cookie; uncapped, a large import pushed every later request past the
+        // server's header limit (HTTP 431) until the cookies were cleared.
+        var result = new PortabilityImportResult();
+        for (var i = 0; i < 200; i++)
+        {
+            result.Errors.Add($"Skipped route 'route-{i}': " + new string('x', 5000));
+        }
+
+        var json = result.ToTempDataMessages();
+        var messages = System.Text.Json.JsonSerializer.Deserialize<List<string>>(json)!;
+
+        json.Length.Should().BeLessThan(10_000);
+        messages.Should().HaveCount(21);
+        messages[^1].Should().Contain("180 more");
+    }
+
     private static string ServicesJson(params PortableService[] services) =>
         JsonSerializer.Serialize(new PortableServiceBundle { Services = services.ToList() }, PortabilityJson.Options);
 

@@ -64,6 +64,7 @@ public sealed class HealthCheckBackgroundService : BackgroundService
             .Where(c => c.Enabled)
             .ToListAsync(token);
         _healthStatusCache.RetainChecks(checks.Select(c => c.Id).ToHashSet());
+        _healthStatusCache.SetMonitoredServices(checks.Select(c => c.DevServiceId).ToHashSet());
 
         var client = _httpClientFactory.CreateClient("DevDeck.HealthCheck");
         client.Timeout = TimeSpan.FromSeconds(3);
@@ -78,10 +79,16 @@ public sealed class HealthCheckBackgroundService : BackgroundService
         await db.SaveChangesAsync(token);
     }
 
-    private static bool IsDue(ServiceHealthCheck check, DateTimeOffset now) =>
-        check.LastCheckedUtc is null ||
-        now - check.LastCheckedUtc >= TimeSpan.FromSeconds(Math.Max(1, check.IntervalSeconds)) ||
-        string.Equals(check.LastStatus, HealthStatusNames.NotRunning, StringComparison.OrdinalIgnoreCase);
+    // Judged from the in-memory results, not the persisted LastCheckedUtc: when a service stops,
+    // its cached results are dropped, so after a restart (or a DevDeck restart) its checks run
+    // on the very next pass instead of waiting out the rest of an interval with no result —
+    // which the RequireHealthyDestination gate would read as Unknown.
+    private bool IsDue(ServiceHealthCheck check, DateTimeOffset now) => IsDue(_healthStatusCache, check, now);
+
+    internal static bool IsDue(HealthStatusCache cache, ServiceHealthCheck check, DateTimeOffset now) =>
+        !cache.TryGetResult(check.DevServiceId, check.Id, out var last) ||
+        now - last.CheckedUtc >= TimeSpan.FromSeconds(Math.Max(1, check.IntervalSeconds)) ||
+        string.Equals(last.Status, HealthStatusNames.NotRunning, StringComparison.OrdinalIgnoreCase);
 
     private async Task RunCheckAsync(ServiceHealthCheck check, HttpClient client, DateTimeOffset now, CancellationToken token)
     {
@@ -130,6 +137,6 @@ public sealed class HealthCheckBackgroundService : BackgroundService
         check.LastStatus = status;
         check.LastStatusCode = statusCode;
         check.LastError = error;
-        _healthStatusCache.Set(check.DevServiceId, check.Id, status);
+        _healthStatusCache.Set(check.DevServiceId, check.Id, status, check.LastCheckedUtc);
     }
 }

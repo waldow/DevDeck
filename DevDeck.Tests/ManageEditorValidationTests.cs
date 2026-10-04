@@ -11,7 +11,9 @@ using DevDeck.Web.Services.Portability;
 using DevDeck.Web.Services.Proxy;
 using DevDeck.Web.Services.Runtime;
 using FluentAssertions;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ViewFeatures;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -28,6 +30,7 @@ public sealed class ManageEditorValidationTests : IDisposable
     private readonly SqliteConnection _connection;
     private readonly TestDbContextFactory _factory;
     private readonly FakeProcessManager _manager = new();
+    private DevDeckProxyConfigProvider? _proxyProvider;
 
     public ManageEditorValidationTests()
     {
@@ -141,26 +144,253 @@ public sealed class ManageEditorValidationTests : IDisposable
         (await db.ProxyRoutes.SingleAsync()).Name.Should().Be("app");
     }
 
+    [Fact]
+    public async Task Service_edit_ignores_field_errors_of_rows_removed_with_the_remove_button()
+    {
+        // A removed row (Delete=true) is skipped on save, so e.g. an imported interval of 0 on
+        // it must not make every save fail.
+        var serviceId = await SeedServiceAsync();
+        var model = ServiceModel();
+        model.HealthChecks.Add(new HealthCheckEditRow { Url = "http://localhost:3001/health", IntervalSeconds = 0, Delete = true });
+        model.EnvironmentVariables.Add(new EnvVarEditRow { Key = "", Value = "" });
+        var controller = ServicesController();
+        controller.ModelState.AddModelError("HealthChecks[0].IntervalSeconds", "Interval must be between 1 second and 1 day.");
+        controller.ModelState.AddModelError("EnvironmentVariables[0].Key", "The Key field is required.");
+
+        var result = await controller.Edit(serviceId, model);
+
+        result.Should().BeOfType<RedirectToActionResult>();
+    }
+
+    [Fact]
+    public async Task Service_edit_still_reports_field_errors_of_kept_rows()
+    {
+        var serviceId = await SeedServiceAsync();
+        var model = ServiceModel();
+        model.HealthChecks.Add(new HealthCheckEditRow { Url = "http://localhost:3001/health", IntervalSeconds = 0 });
+        var controller = ServicesController();
+        controller.ModelState.AddModelError("HealthChecks[0].IntervalSeconds", "Interval must be between 1 second and 1 day.");
+
+        var result = await controller.Edit(serviceId, model);
+
+        result.Should().BeOfType<ViewResult>();
+    }
+
+    [Fact]
+    public async Task Service_edit_drops_an_invalid_external_port_while_passthru_is_off()
+    {
+        // The field is hidden unless passthru is on, so its error could never be fixed.
+        var serviceId = await SeedServiceAsync();
+        var model = ServiceModel();
+        model.ExternalPort = 0;
+        var controller = ServicesController();
+        controller.ModelState.AddModelError(nameof(ServiceEditViewModel.ExternalPort), "External port must be between 1 and 65535.");
+
+        var result = await controller.Edit(serviceId, model);
+
+        result.Should().BeOfType<RedirectToActionResult>();
+        await using var db = _factory.CreateDbContext();
+        (await db.DevServices.SingleAsync()).ExternalPort.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Service_edit_can_swap_two_environment_variable_keys()
+    {
+        // Renaming rows in place collided on the unique (service, key) index mid-save.
+        var serviceId = await SeedServiceAsync();
+        int aId, bId;
+        await using (var db = _factory.CreateDbContext())
+        {
+            var service = await db.DevServices.Include(s => s.EnvironmentVariables).SingleAsync();
+            service.EnvironmentVariables.Add(new ServiceEnvironmentVariable { Key = "A", Value = "1" });
+            service.EnvironmentVariables.Add(new ServiceEnvironmentVariable { Key = "B", Value = "2", IsSecret = true });
+            await db.SaveChangesAsync();
+            aId = service.EnvironmentVariables.Single(e => e.Key == "A").Id;
+            bId = service.EnvironmentVariables.Single(e => e.Key == "B").Id;
+        }
+        var model = ServiceModel();
+        model.EnvironmentVariables.Add(new EnvVarEditRow { Id = aId, Key = "B", Value = "1" });
+        model.EnvironmentVariables.Add(new EnvVarEditRow { Id = bId, Key = "A", Value = EnvVarEditRow.SecretPlaceholder, IsSecret = true });
+
+        var result = await ServicesController().Edit(serviceId, model);
+
+        result.Should().BeOfType<RedirectToActionResult>();
+        await using var verify = _factory.CreateDbContext();
+        var env = await verify.ServiceEnvironmentVariables.ToDictionaryAsync(e => e.Key, e => e.Value);
+        env.Should().BeEquivalentTo(new Dictionary<string, string> { ["B"] = "1", ["A"] = "2" });
+    }
+
+    [Fact]
+    public async Task Service_delete_rebuilds_the_proxy_snapshot()
+    {
+        var serviceId = await SeedServiceAsync(url: "http://localhost:{port}");
+        await using (var db = _factory.CreateDbContext())
+        {
+            db.ProxyRoutes.Add(new ProxyRoute { Name = "api", MatchPath = "/api/{**rest}", PathTransformMode = "None", DevServiceId = serviceId });
+            await db.SaveChangesAsync();
+        }
+        var controller = ServicesController();
+        await _proxyProvider!.ReloadAsync();
+        _proxyProvider.GetConfig().Routes.Should().ContainSingle();
+
+        await controller.Delete(serviceId);
+
+        // Unlinked from the deleted service it has no destination, so it is no longer live
+        // (it kept the deleted service's destination and gating until some later reload).
+        _proxyProvider.GetConfig().Routes.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Service_delete_is_refused_while_a_start_is_in_flight()
+    {
+        var serviceId = await SeedServiceAsync();
+        _manager.Busy.Add(serviceId);
+
+        await ServicesController().Delete(serviceId);
+
+        await using var db = _factory.CreateDbContext();
+        (await db.DevServices.CountAsync()).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Route_create_refuses_a_route_routing_could_not_tell_apart_from_another()
+    {
+        await RoutesController().Create(RouteModel("api", "/api/{**rest}"));
+
+        var result = await RoutesController().Create(RouteModel("api-v2", "/api/{**anything}"));
+
+        result.Should().BeOfType<ViewResult>();
+        ((ViewResult)result).ViewData.ModelState[nameof(ProxyRouteEditViewModel.MatchPath)]!.Errors
+            .Should().ContainSingle().Which.ErrorMessage.Should().Contain("'api'");
+    }
+
+    [Fact]
+    public async Task Route_create_allows_the_same_path_with_a_different_order()
+    {
+        await RoutesController().Create(RouteModel("api", "/api/{**rest}"));
+        var model = RouteModel("api-fallback", "/api/{**rest}");
+        model.Order = 10;
+
+        var result = await RoutesController().Create(model);
+
+        result.Should().BeOfType<RedirectToActionResult>();
+    }
+
+    [Fact]
+    public async Task Route_enable_refuses_a_route_routing_could_not_tell_apart_from_another()
+    {
+        await RoutesController().Create(RouteModel("api", "/api/{**rest}"));
+        var disabled = RouteModel("api-copy", "/api/{**rest}");
+        disabled.Enabled = false;
+        await RoutesController().Create(disabled);
+        int copyId;
+        await using (var db = _factory.CreateDbContext())
+        {
+            copyId = (await db.ProxyRoutes.SingleAsync(r => r.Name == "api-copy")).Id;
+        }
+
+        var controller = RoutesController();
+        await controller.Enable(copyId);
+
+        controller.TempData["Error"].Should().BeOfType<string>().Which.Should().Contain("was not enabled");
+        await using var verify = _factory.CreateDbContext();
+        (await verify.ProxyRoutes.SingleAsync(r => r.Id == copyId)).Enabled.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Profile_edit_ignores_errors_on_rows_that_are_not_included()
+    {
+        var serviceId = await SeedServiceAsync();
+        int profileId;
+        await using (var db = _factory.CreateDbContext())
+        {
+            var profile = new LaunchProfile { Name = "stack" };
+            db.LaunchProfiles.Add(profile);
+            await db.SaveChangesAsync();
+            profileId = profile.Id;
+        }
+        var model = new ProfileEditViewModel
+        {
+            Id = profileId,
+            Name = "stack",
+            Services = [new ProfileServiceRow { DevServiceId = serviceId, ServiceName = "api", Include = false, StartDelaySeconds = 5000 }],
+        };
+        var controller = ProfilesController();
+        controller.ModelState.AddModelError("Services[0].StartDelaySeconds", "Start delay must be between 0 and 3600 seconds.");
+
+        var result = await controller.Edit(profileId, model);
+
+        result.Should().BeOfType<RedirectToActionResult>();
+    }
+
+    [Fact]
+    public async Task Services_import_does_not_switch_a_running_service_to_passthru()
+    {
+        var serviceId = await SeedServiceAsync();
+        _manager.Running.Add(serviceId);
+        var json = System.Text.Json.JsonSerializer.Serialize(new PortableServiceBundle
+        {
+            Services = [new PortableService { Name = "api", ServiceType = "NodeApi", WorkingDirectory = "/tmp", StartCommand = "npm", UseExternalInstance = true }],
+        }, PortabilityJson.Options);
+
+        var result = await new PortabilityImporter(_factory, _manager).ImportServicesAsync(json);
+
+        result.Updated.Should().Be(1);
+        result.Warnings.Should().ContainSingle().Which.Should().Contain("is running");
+        await using var db = _factory.CreateDbContext();
+        (await db.DevServices.SingleAsync()).UseExternalInstance.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Downloading_a_log_that_no_longer_exists_explains_why()
+    {
+        var serviceId = await SeedServiceAsync();
+        long runId;
+        await using (var db = _factory.CreateDbContext())
+        {
+            var run = new ServiceRun
+            {
+                DevServiceId = serviceId,
+                Status = "Stopped",
+                StartedUtc = DateTimeOffset.UtcNow.AddDays(-30),
+                StoppedUtc = DateTimeOffset.UtcNow.AddDays(-30),
+                LogFilePath = Path.Combine(DevDeckPaths.LogsFolder, $"gone-{Guid.NewGuid():N}.log"),
+            };
+            db.ServiceRuns.Add(run);
+            await db.SaveChangesAsync();
+            runId = run.Id;
+        }
+        var controller = WithTempData(new LogsController(_factory, _manager, MsOptions.Create(new DevDeckOptions())));
+
+        var result = await controller.Download(runId);
+
+        result.Should().BeOfType<RedirectToActionResult>().Which.ActionName.Should().Be("Details");
+        controller.TempData["Error"].Should().BeOfType<string>().Which.Should().Contain("no longer exists");
+    }
+
     private ServicesController ServicesController()
     {
         var options = MsOptions.Create(new DevDeckOptions());
-        return new ServicesController(
+        _proxyProvider = new DevDeckProxyConfigProvider(_factory, Builder(), NullLogger<DevDeckProxyConfigProvider>.Instance);
+        return WithTempData(new ServicesController(
             _factory,
             _manager,
             new CommandPresetProvider(new CommandExecutableResolver()),
             new PortProbeService(_manager),
             new PortabilityExporter(_factory),
-            new PortabilityImporter(_factory),
-            new DevDeckProxyConfigProvider(_factory, Builder(), NullLogger<DevDeckProxyConfigProvider>.Instance),
-            options);
+            new PortabilityImporter(_factory, _manager),
+            _proxyProvider,
+            options,
+            new HealthStatusCache()));
     }
 
     private ProxyRoutesController RoutesController()
     {
         var builder = Builder();
-        return new ProxyRoutesController(
+        _proxyProvider = new DevDeckProxyConfigProvider(_factory, builder, NullLogger<DevDeckProxyConfigProvider>.Instance);
+        return WithTempData(new ProxyRoutesController(
             _factory,
-            new DevDeckProxyConfigProvider(_factory, builder, NullLogger<DevDeckProxyConfigProvider>.Instance),
+            _proxyProvider,
             new ProxyDestinationValidator(allowExternal: false),
             builder,
             new CommandTemplateRenderer(),
@@ -168,7 +398,23 @@ public sealed class ManageEditorValidationTests : IDisposable
             _manager,
             MsOptions.Create(new DevDeckOptions()),
             new PortabilityExporter(_factory),
-            new PortabilityImporter(_factory));
+            new PortabilityImporter(_factory),
+            new HealthStatusCache()));
+    }
+
+    private ProfilesController ProfilesController() =>
+        WithTempData(new ProfilesController(_factory, _manager, new PortabilityExporter(_factory), new PortabilityImporter(_factory)));
+
+    private static T WithTempData<T>(T controller) where T : Controller
+    {
+        controller.TempData = new TempDataDictionary(new DefaultHttpContext(), new NullTempDataProvider());
+        return controller;
+    }
+
+    private sealed class NullTempDataProvider : ITempDataProvider
+    {
+        public IDictionary<string, object> LoadTempData(HttpContext context) => new Dictionary<string, object>();
+        public void SaveTempData(HttpContext context, IDictionary<string, object> values) { }
     }
 
     private static ProxyRouteBuilder Builder()
@@ -181,7 +427,7 @@ public sealed class ManageEditorValidationTests : IDisposable
         return new ProxyRouteBuilder(new ProxyDestinationValidator(allowExternal: false), yarpValidator: yarpValidator);
     }
 
-    private async Task<int> SeedServiceAsync()
+    private async Task<int> SeedServiceAsync(string? url = null)
     {
         await using var db = _factory.CreateDbContext();
         var service = new DevService
@@ -191,6 +437,7 @@ public sealed class ManageEditorValidationTests : IDisposable
             WorkingDirectory = AppContext.BaseDirectory,
             StartCommand = "npm",
             Port = 3001,
+            Url = url,
         };
         db.DevServices.Add(service);
         await db.SaveChangesAsync();
@@ -256,7 +503,9 @@ public sealed class ManageEditorValidationTests : IDisposable
 
         public LiveLogSlice GetLiveLogsSince(int serviceId, long since) => new([], 0, 0, false);
 
-        public bool IsServiceBusy(int serviceId) => false;
+        public HashSet<int> Busy { get; } = new();
+
+        public bool IsServiceBusy(int serviceId) => Busy.Contains(serviceId);
 
         public void ClearLiveLogs(int serviceId)
         {

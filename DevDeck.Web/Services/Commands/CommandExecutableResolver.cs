@@ -33,46 +33,75 @@ public sealed class CommandExecutableResolver
 
         if (_isWindows)
         {
-            return name switch
-            {
-                "npm" => "npm.cmd",
-                "npx" => "npx.cmd",
-                "func" => "func.cmd",
-                "yarn" => "yarn.cmd",
-                "pnpm" => "pnpm.cmd",
-                "node" => "node.exe",
-                "dotnet" => "dotnet.exe",
-                "docker" => "docker.exe",
-                _ => name,
-            };
+            return WindowsNames.TryGetValue(name, out var windowsName) ? windowsName : name;
         }
 
-        return name switch
-        {
-            "npm.cmd" => "npm",
-            "npx.cmd" => "npx",
-            "func.cmd" => "func",
-            "yarn.cmd" => "yarn",
-            "pnpm.cmd" => "pnpm",
-            "node.exe" => "node",
-            "dotnet.exe" => "dotnet",
-            "docker.exe" => "docker",
-            _ => name,
-        };
+        var unixName = WindowsNames.FirstOrDefault(pair => pair.Value == name).Key;
+        return unixName ?? name;
     }
 
-    public string ResolveForLaunch(string command, string? pathValue = null)
+    // Well-known tools and the name each is launched by on Windows (npm-style .cmd shims or
+    // the .exe). On Linux/macOS the mapping is reversed.
+    private static readonly IReadOnlyDictionary<string, string> WindowsNames = new Dictionary<string, string>
+    {
+        ["npm"] = "npm.cmd",
+        ["npx"] = "npx.cmd",
+        ["func"] = "func.cmd",
+        ["yarn"] = "yarn.cmd",
+        ["pnpm"] = "pnpm.cmd",
+        ["node"] = "node.exe",
+        ["dotnet"] = "dotnet.exe",
+        ["docker"] = "docker.exe",
+    };
+
+    /// <summary>
+    /// The file to hand to <c>ProcessStartInfo.FileName</c>. Bare names are looked up on
+    /// <paramref name="pathValue"/>; a relative path such as <c>./run.sh</c> or
+    /// <c>bin\dev.cmd</c> is resolved against <paramref name="workingDirectory"/> (the
+    /// service's directory), not against DevDeck's own current directory, which is where
+    /// Process.Start would otherwise look for it.
+    /// </summary>
+    public string ResolveForLaunch(string command, string? pathValue = null, string? workingDirectory = null)
     {
         var resolved = Resolve(command);
-        if (string.IsNullOrWhiteSpace(resolved) ||
-            Path.IsPathRooted(resolved) ||
-            resolved.IndexOfAny(DirectorySeparators) >= 0)
+        if (string.IsNullOrWhiteSpace(resolved) || Path.IsPathRooted(resolved))
         {
             return resolved;
         }
 
-        return FindOnPath(resolved, pathValue) ?? resolved;
+        if (resolved.IndexOfAny(DirectorySeparators) >= 0)
+        {
+            if (string.IsNullOrWhiteSpace(workingDirectory))
+            {
+                return resolved;
+            }
+
+            try
+            {
+                return Path.GetFullPath(resolved, workingDirectory);
+            }
+            catch (ArgumentException)
+            {
+                return resolved;
+            }
+        }
+
+        var found = FindOnPath(resolved, pathValue);
+        if (found is null && _isWindows && IsWindowsShimName(resolved))
+        {
+            // The well-known tools map to their npm-style shim (func -> func.cmd), but some are
+            // installed as a plain executable instead — Azure Functions Core Tools from the MSI,
+            // winget or Chocolatey puts only func.exe on PATH. Fall back to the usual PATHEXT
+            // search for the bare name rather than failing on a shim that isn't there.
+            found = FindOnPath(Path.GetFileNameWithoutExtension(resolved), pathValue);
+        }
+
+        return found ?? resolved;
     }
+
+    // "func.cmd", "npm.cmd", "dotnet.exe", ... — the Windows names Resolve maps tools to.
+    private static bool IsWindowsShimName(string name) =>
+        WindowsNames.Values.Contains(name, StringComparer.OrdinalIgnoreCase);
 
     private string? FindOnPath(string command, string? pathValue)
     {

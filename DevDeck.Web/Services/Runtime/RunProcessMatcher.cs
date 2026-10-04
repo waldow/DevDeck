@@ -13,25 +13,44 @@ internal static class RunProcessMatcher
     public static bool IsSameRunProcessStillAlive(
         int processId,
         DateTimeOffset runStartedUtc,
+        long? processStartKey,
         Action<Exception>? onInspectFailed = null)
     {
-        using var process = TryGetSameRunProcess(processId, runStartedUtc, onInspectFailed);
+        using var process = TryGetSameRunProcess(processId, runStartedUtc, processStartKey, onInspectFailed);
         return process is not null;
     }
 
+    /// <summary>
+    /// The run's process if it is still alive. With a recorded <paramref name="processStartKey"/>
+    /// (see <c>ServiceRun.ProcessStartKey</c>) the match is on that; otherwise on the run's start
+    /// time — which on Linux breaks when the wall clock is stepped after the start (.NET derives
+    /// Process.StartTime from the current boot time, which moves with the clock).
+    /// </summary>
     public static Process? TryGetSameRunProcess(
         int processId,
         DateTimeOffset runStartedUtc,
+        long? processStartKey,
         Action<Exception>? onInspectFailed = null)
     {
         Process? process = null;
         try
         {
+            if (processStartKey is long recorded &&
+                (!ProcessTree.TryGetIdentity(processId, out var identity) || !SameStartKey(identity.StartKey, recorded)))
+            {
+                return null;
+            }
+
             process = Process.GetProcessById(processId);
             if (process.HasExited)
             {
                 process.Dispose();
                 return null;
+            }
+
+            if (processStartKey is not null)
+            {
+                return process;
             }
 
             var processStartedUtc = new DateTimeOffset(process.StartTime).ToUniversalTime();
@@ -54,4 +73,9 @@ internal static class RunProcessMatcher
             return null;
         }
     }
+
+    // Linux: the kernel's start tick, exact. Elsewhere a creation time read back through
+    // DateTime conversions, so allow a little rounding.
+    private static bool SameStartKey(long current, long recorded) =>
+        OperatingSystem.IsLinux() ? current == recorded : Math.Abs(current - recorded) < TimeSpan.TicksPerSecond;
 }

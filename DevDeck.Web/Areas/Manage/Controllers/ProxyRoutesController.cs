@@ -30,6 +30,8 @@ public sealed class ProxyRoutesController : Controller
 
     private readonly PortabilityExporter _exporter;
     private readonly PortabilityImporter _importer;
+    private readonly HealthStatusCache _healthStatusCache;
+    private readonly AllowedHostsPolicy? _allowedHosts;
 
     public ProxyRoutesController(
         IDbContextFactory<DevDeckDbContext> dbFactory,
@@ -41,7 +43,9 @@ public sealed class ProxyRoutesController : Controller
         IDevDeckProcessManager manager,
         IOptions<DevDeckOptions> options,
         PortabilityExporter exporter,
-        PortabilityImporter importer)
+        PortabilityImporter importer,
+        HealthStatusCache healthStatusCache,
+        AllowedHostsPolicy? allowedHosts = null)
     {
         _dbFactory = dbFactory;
         _provider = provider;
@@ -53,6 +57,8 @@ public sealed class ProxyRoutesController : Controller
         _options = options;
         _exporter = exporter;
         _importer = importer;
+        _healthStatusCache = healthStatusCache;
+        _allowedHosts = allowedHosts;
     }
 
     [HttpGet("")]
@@ -65,6 +71,7 @@ public sealed class ProxyRoutesController : Controller
             .ToListAsync();
         ViewBag.Warnings = _provider.LastWarnings;
         ViewBag.GatewayBaseUrl = _options.Value.ReverseProxy.GatewayBaseUrl;
+        ViewBag.Destinations = routes.ToDictionary(r => r.Id, r => ResolveDestinationUrl(r.DestinationUrlOverride, r.DevService));
         return View(routes);
     }
 
@@ -92,6 +99,7 @@ public sealed class ProxyRoutesController : Controller
         db.ProxyRoutes.Add(entity);
         await db.SaveChangesAsync();
         await _provider.ReloadAsync();
+        WarnAboutBlockedHosts(entity);
         return RedirectToAction(nameof(Index));
     }
 
@@ -147,6 +155,7 @@ public sealed class ProxyRoutesController : Controller
 
         await db.SaveChangesAsync();
         await _provider.ReloadAsync();
+        WarnAboutBlockedHosts(entity);
         return RedirectToAction(nameof(Index));
     }
 
@@ -209,11 +218,6 @@ public sealed class ProxyRoutesController : Controller
             vm.ExternalPort = entity.DevService.ExternalPort;
             vm.EffectivePort = entity.DevService.EffectivePort;
             vm.ServiceRunning = _manager.GetRunningProcess(entity.DevService.Id) is not null;
-            var hc = await db.ServiceHealthChecks
-                .Where(h => h.DevServiceId == entity.DevService.Id && h.Enabled)
-                .OrderByDescending(h => h.LastCheckedUtc)
-                .FirstOrDefaultAsync();
-            vm.HealthStatus = hc?.LastStatus ?? "Unknown";
         }
 
         if (destinationUrl is not null && Uri.TryCreate(destinationUrl, UriKind.Absolute, out var uri))
@@ -221,8 +225,20 @@ public sealed class ProxyRoutesController : Controller
             vm.DestinationPortOpen = await _portProbe.IsEndpointOpenAsync(uri.Host, uri.Port);
         }
 
+        if (entity.DevService is not null)
+        {
+            // The aggregate the RequireHealthyDestination gate itself evaluates.
+            var isUp = entity.DevService.UseExternalInstance ? vm.DestinationPortOpen : vm.ServiceRunning;
+            vm.HealthStatus = _healthStatusCache.GetDisplayStatus(entity.DevService.Id, isUp);
+            vm.HealthGatePasses = _healthStatusCache.IsHealthy(entity.DevService.Id);
+        }
+
         // Exactly what would keep this route out of the live snapshot.
         vm.Warnings.AddRange(await _builder.ValidateAsync(entity));
+        if (BlockedHostsMessage(entity) is { } blockedHosts)
+        {
+            vm.Warnings.Add(blockedHosts);
+        }
 
         return View(vm);
     }
@@ -260,7 +276,7 @@ public sealed class ProxyRoutesController : Controller
             await _provider.ReloadAsync();
         }
         TempData[result.HasErrors ? "Error" : "Info"] = result.ToFlashMessage();
-        TempData["ImportWarnings"] = JsonSerializer.Serialize(result.Warnings.Concat(result.Errors).ToList());
+        TempData["ImportWarnings"] = result.ToTempDataMessages();
         return RedirectToAction(nameof(Index));
     }
 
@@ -295,6 +311,16 @@ public sealed class ProxyRoutesController : Controller
         await using var db = await _dbFactory.CreateDbContextAsync();
         var entity = await db.ProxyRoutes.FirstOrDefaultAsync(r => r.Id == id);
         if (entity is null) return NotFound();
+        if (enabled && !entity.Enabled)
+        {
+            entity.Enabled = true;
+            var others = await db.ProxyRoutes.AsNoTracking().Where(r => r.Enabled && r.Id != id).ToListAsync();
+            if (ProxyRouteConflicts.FindConflict(entity, others) is { } conflict)
+            {
+                TempData["Error"] = $"'{entity.Name}' was not enabled. {ProxyRouteConflicts.Describe(conflict)}";
+                return RedirectToAction(nameof(Index));
+            }
+        }
         entity.Enabled = enabled;
         entity.UpdatedUtc = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync();
@@ -377,6 +403,13 @@ public sealed class ProxyRoutesController : Controller
             {
                 ModelState.AddModelError(string.Empty, error);
             }
+
+            // Two enabled routes routing can't tell apart make every request they match a 500.
+            var others = await db.ProxyRoutes.AsNoTracking().Where(r => r.Enabled && r.Id != routeId).ToListAsync();
+            if (ProxyRouteConflicts.FindConflict(candidate, others) is { } conflict)
+            {
+                ModelState.AddModelError(nameof(model.MatchPath), ProxyRouteConflicts.Describe(conflict));
+            }
         }
     }
 
@@ -438,6 +471,24 @@ public sealed class ProxyRoutesController : Controller
         return _renderer.Render(
             url,
             CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.EffectivePort, service.WorkingDirectory));
+    }
+
+    // Saved, but host filtering (AllowedHosts) answers 400 to these hosts before routing runs.
+    private void WarnAboutBlockedHosts(ProxyRoute route)
+    {
+        if (BlockedHostsMessage(route) is { } message)
+        {
+            TempData["Error"] = $"Route '{route.Name}' saved. {message}";
+        }
+    }
+
+    private string? BlockedHostsMessage(ProxyRoute route)
+    {
+        var blocked = _allowedHosts?.Blocked(ProxyRouteConflicts.ParseHosts(route.MatchHostsCsv)) ?? [];
+        return blocked.Count == 0
+            ? null
+            : $"Requests for {string.Join(", ", blocked.Select(h => $"'{h}'"))} are rejected with HTTP 400 because " +
+              "the host is not in DevDeck's AllowedHosts setting; add it there (see the README) for this route to receive them.";
     }
 
     private static string? NormalizeOptional(string? value) =>

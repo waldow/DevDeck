@@ -27,6 +27,8 @@ public sealed class ServicesController : Controller
     private readonly PortabilityImporter _importer;
     private readonly DevDeckProxyConfigProvider _proxyProvider;
     private readonly IOptions<DevDeckOptions> _options;
+    private readonly HealthStatusCache _healthStatusCache;
+    private readonly CommandTemplateRenderer _renderer;
 
     public ServicesController(
         IDbContextFactory<DevDeckDbContext> dbFactory,
@@ -36,7 +38,9 @@ public sealed class ServicesController : Controller
         PortabilityExporter exporter,
         PortabilityImporter importer,
         DevDeckProxyConfigProvider proxyProvider,
-        IOptions<DevDeckOptions> options)
+        IOptions<DevDeckOptions> options,
+        HealthStatusCache healthStatusCache,
+        CommandTemplateRenderer? renderer = null)
     {
         _dbFactory = dbFactory;
         _manager = manager;
@@ -46,6 +50,8 @@ public sealed class ServicesController : Controller
         _importer = importer;
         _proxyProvider = proxyProvider;
         _options = options;
+        _healthStatusCache = healthStatusCache;
+        _renderer = renderer ?? new CommandTemplateRenderer();
     }
 
     [HttpGet("")]
@@ -57,8 +63,14 @@ public sealed class ServicesController : Controller
             .OrderBy(s => s.DisplayOrder).ThenBy(s => s.Name)
             .ToListAsync();
         ViewBag.Presets = _presets.All();
-        ViewBag.RunningIds = _manager.GetRunningProcesses().Select(r => r.DevServiceId).ToHashSet();
+        var runningIds = _manager.GetRunningProcesses().Select(r => r.DevServiceId).ToHashSet();
+        ViewBag.RunningIds = runningIds;
         ViewBag.PollMs = _options.Value.DashboardPollingMilliseconds;
+        // First paint of the health pills; the Snapshot poll keeps them current. (A passthru
+        // service's reachability is only known from the poll's port probe.)
+        ViewBag.HealthStatuses = services.ToDictionary(
+            s => s.Id,
+            s => _healthStatusCache.GetDisplayStatus(s.Id, s.UseExternalInstance || runningIds.Contains(s.Id)));
 
         // Best-effort, one-shot port-conflict sweep (this GET is not polled).
         // Probe every configured port in parallel; flag the ones held by a
@@ -89,6 +101,8 @@ public sealed class ServicesController : Controller
                 vm.ServiceType = p.Key;
                 vm.StartCommand = p.StartCommand;
                 vm.StartArguments = p.StartArguments;
+                vm.StopCommand = p.StopCommand;
+                vm.StopArguments = p.StopArguments;
                 vm.Port = p.DefaultPort;
                 vm.Url = p.UrlTemplate;
                 if (p.HealthCheckUrlTemplate is not null)
@@ -226,9 +240,9 @@ public sealed class ServicesController : Controller
         ViewBag.IsRunning = isRunning;
         ValidateServiceModel(model, entity.WorkingDirectory);
 
-        // Same rule as ToggleExternal: switching a running managed service to passthru would
-        // leave its process running with no Stop control anywhere in the UI.
-        if (model.UseExternalInstance && !entity.UseExternalInstance && isRunning)
+        // Same rule as ToggleExternal: switching a running (or starting) managed service to
+        // passthru would leave its process running with no Stop control anywhere in the UI.
+        if (model.UseExternalInstance && !entity.UseExternalInstance && (isRunning || _manager.IsServiceBusy(id)))
         {
             ModelState.AddModelError(nameof(model.UseExternalInstance),
                 "Stop the service before switching it to external (passthru) mode.");
@@ -244,6 +258,8 @@ public sealed class ServicesController : Controller
             ModelState.AddModelError(nameof(model.Name), "A service with this name already exists.");
             return View(model);
         }
+
+        var runningPort = isRunning && entity.Port != model.Port ? entity.Port : null;
 
         entity.Name = model.Name;
         entity.ServiceType = model.ServiceType;
@@ -266,6 +282,11 @@ public sealed class ServicesController : Controller
 
         await db.SaveChangesAsync();
         await _proxyProvider.ReloadAsync();
+        if (runningPort is int oldPort)
+        {
+            TempData["Info"] = $"Saved. '{entity.Name}' is still running with port {oldPort}; the proxy and health checks now use " +
+                               $"{entity.Port?.ToString() ?? "no port"}, so restart it to apply the change.";
+        }
         return RedirectToAction(nameof(Index));
     }
 
@@ -286,6 +307,12 @@ public sealed class ServicesController : Controller
             .ToListAsync();
         ViewBag.RunningInfo = _manager.GetRunningProcess(id);
         ViewBag.LiveLogs = _manager.GetLiveLogs(id).TakeLast(50).ToList();
+        if (!string.IsNullOrWhiteSpace(entity.Url))
+        {
+            var rendered = _renderer.Render(entity.Url,
+                CommandTemplateRenderer.BuildValues(entity.Id, entity.Name, entity.EffectivePort, entity.WorkingDirectory));
+            if (rendered.UnknownPlaceholders.Count == 0) ViewBag.ResolvedUrl = rendered.Text;
+        }
         return View(entity);
     }
 
@@ -296,13 +323,18 @@ public sealed class ServicesController : Controller
         await using var db = await _dbFactory.CreateDbContextAsync();
         var entity = await db.DevServices.FirstOrDefaultAsync(s => s.Id == id);
         if (entity is null) return NotFound();
-        if (_manager.GetRunningProcess(id) is not null)
+        // A start still in flight (e.g. waiting for Azurite) isn't in the running map yet but
+        // would launch a process for the deleted service.
+        if (_manager.GetRunningProcess(id) is not null || _manager.IsServiceBusy(id))
         {
             TempData["Error"] = "Stop the service before deleting it.";
             return RedirectToAction(nameof(Index));
         }
         db.DevServices.Remove(entity);
         await db.SaveChangesAsync();
+        // Its routes are now unlinked (DevServiceId set to null): rebuild the snapshot so they
+        // stop carrying the deleted service's destination and gating.
+        await _proxyProvider.ReloadAsync();
         return RedirectToAction(nameof(Index));
     }
 
@@ -359,8 +391,8 @@ public sealed class ServicesController : Controller
         var entity = await db.DevServices.FirstOrDefaultAsync(s => s.Id == id, cancellationToken);
         if (entity is null) return NotFound();
 
-        // Can't passthru a service DevDeck is actively running — stop it first.
-        if (!entity.UseExternalInstance && _manager.GetRunningProcess(id) is not null)
+        // Can't passthru a service DevDeck is actively running (or starting) — stop it first.
+        if (!entity.UseExternalInstance && (_manager.GetRunningProcess(id) is not null || _manager.IsServiceBusy(id)))
         {
             const string msg = "Stop the service before switching it to external (passthru) mode.";
             if (WantsJson()) return Json(new { success = false, serviceId = id, message = msg });
@@ -462,10 +494,11 @@ public sealed class ServicesController : Controller
         var result = await _importer.ImportServicesAsync(payload, cancellationToken);
         if (result.TotalAffected > 0)
         {
-            await _proxyProvider.ReloadAsync(cancellationToken);
+            // The import is committed; an aborted request must not skip the reload.
+            await _proxyProvider.ReloadAsync();
         }
         TempData[result.HasErrors ? "Error" : "Info"] = result.ToFlashMessage();
-        TempData["ImportWarnings"] = JsonSerializer.Serialize(result.Warnings.Concat(result.Errors).ToList());
+        TempData["ImportWarnings"] = result.ToTempDataMessages();
         return RedirectToAction(nameof(Index));
     }
 
@@ -512,6 +545,34 @@ public sealed class ServicesController : Controller
     // machine) — StartServiceCoreAsync re-checks it at launch anyway.
     private void ValidateServiceModel(ServiceEditViewModel model, string? currentWorkingDirectory = null)
     {
+        // Rows removed with ✕ (and blank rows) are skipped on save, so their field errors —
+        // an imported out-of-range interval, say — must not block it.
+        for (var i = 0; i < model.EnvironmentVariables.Count; i++)
+        {
+            var row = model.EnvironmentVariables[i];
+            if (row.Delete || string.IsNullOrWhiteSpace(row.Key))
+            {
+                ClearModelStatePrefix($"{nameof(model.EnvironmentVariables)}[{i}].");
+            }
+        }
+        for (var i = 0; i < model.HealthChecks.Count; i++)
+        {
+            var row = model.HealthChecks[i];
+            if (row.Delete || string.IsNullOrWhiteSpace(row.Url))
+            {
+                ClearModelStatePrefix($"{nameof(model.HealthChecks)}[{i}].");
+            }
+        }
+
+        // The external port is hidden and unused unless the service is in passthru mode.
+        if (!model.UseExternalInstance &&
+            ModelState.TryGetValue(nameof(model.ExternalPort), out var externalPortState) &&
+            externalPortState.Errors.Count > 0)
+        {
+            ModelState.Remove(nameof(model.ExternalPort));
+            model.ExternalPort = null;
+        }
+
         var directoryChanged = !string.Equals(model.WorkingDirectory, currentWorkingDirectory, StringComparison.Ordinal);
         if (!model.UseExternalInstance && directoryChanged &&
             !string.IsNullOrWhiteSpace(model.WorkingDirectory) && !Directory.Exists(model.WorkingDirectory))
@@ -540,6 +601,14 @@ public sealed class ServicesController : Controller
         {
             ModelState.AddModelError(nameof(model.EnvironmentVariables),
                 $"Environment variable '{key}' is defined more than once.");
+        }
+    }
+
+    private void ClearModelStatePrefix(string prefix)
+    {
+        foreach (var key in ModelState.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal)).ToList())
+        {
+            ModelState.Remove(key);
         }
     }
 
@@ -584,14 +653,24 @@ public sealed class ServicesController : Controller
             else
             {
                 var existing = entity.EnvironmentVariables.FirstOrDefault(e => e.Id == row.Id);
-                if (existing is not null)
+                if (existing is null) continue;
+
+                var value = row.Value == EnvVarEditRow.SecretPlaceholder ? existing.Value : row.Value ?? string.Empty;
+                if (existing.Key == row.Key)
                 {
-                    existing.Key = row.Key;
-                    if (row.Value != EnvVarEditRow.SecretPlaceholder)
-                    {
-                        existing.Value = row.Value ?? string.Empty;
-                    }
+                    existing.Value = value;
                     existing.IsSecret = row.IsSecret;
+                }
+                else
+                {
+                    // A renamed key becomes a new row: renaming rows in place can collide on the
+                    // unique (service, key) index mid-save — swapping two keys can't be ordered
+                    // at all — whereas EF always runs the deletes before the inserts.
+                    db.ServiceEnvironmentVariables.Remove(existing);
+                    entity.EnvironmentVariables.Add(new ServiceEnvironmentVariable
+                    {
+                        Key = row.Key, Value = value, IsSecret = row.IsSecret,
+                    });
                 }
             }
         }

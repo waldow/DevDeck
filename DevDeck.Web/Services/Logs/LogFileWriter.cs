@@ -79,6 +79,15 @@ public sealed class LogFileWriter : IAsyncDisposable
         }
     }
 
+    /// <summary>Whether a handle is currently open for <paramref name="filePath"/>.</summary>
+    internal bool IsOpen(string filePath)
+    {
+        lock (_lock)
+        {
+            return _writers.ContainsKey(filePath);
+        }
+    }
+
     public ValueTask DisposeAsync()
     {
         WriterEntry[] entries;

@@ -13,12 +13,18 @@ public sealed class StatusController : Controller
     private readonly IDbContextFactory<DevDeckDbContext> _dbFactory;
     private readonly IDevDeckProcessManager _manager;
     private readonly PortProbeService _portProbe;
+    private readonly HealthStatusCache _healthStatusCache;
 
-    public StatusController(IDbContextFactory<DevDeckDbContext> dbFactory, IDevDeckProcessManager manager, PortProbeService portProbe)
+    public StatusController(
+        IDbContextFactory<DevDeckDbContext> dbFactory,
+        IDevDeckProcessManager manager,
+        PortProbeService portProbe,
+        HealthStatusCache healthStatusCache)
     {
         _dbFactory = dbFactory;
         _manager = manager;
         _portProbe = portProbe;
+        _healthStatusCache = healthStatusCache;
     }
 
     [HttpGet("Snapshot")]
@@ -27,7 +33,6 @@ public sealed class StatusController : Controller
         // Polled every DashboardPollingMilliseconds — read-only, so skip change tracking.
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
         var services = await db.DevServices.AsNoTracking().OrderBy(s => s.DisplayOrder).ToListAsync(cancellationToken);
-        var healthChecks = await db.ServiceHealthChecks.AsNoTracking().ToListAsync(cancellationToken);
 
         // Passthru services have no DevDeck-managed process, so a one-shot TCP probe of the
         // external port is the only way to tell whether the instance is up. Probe in parallel.
@@ -42,23 +47,22 @@ public sealed class StatusController : Controller
         var payload = services.Select(s =>
         {
             var info = _manager.GetRunningProcess(s.Id);
-            var hc = healthChecks
-                .Where(h => h.DevServiceId == s.Id && h.Enabled)
-                .OrderByDescending(h => h.LastCheckedUtc)
-                .FirstOrDefault();
 
+            // Health comes from the same aggregate the proxy's RequireHealthyDestination gate
+            // uses (every enabled check, plus the post-start warm-up), so the pill can't show
+            // Healthy while the gate answers 503.
             string runtimeStatus;
             string healthStatus;
             if (s.UseExternalInstance)
             {
                 var open = externalUp.Contains(s.Id);
                 runtimeStatus = open ? "External" : "Offline";
-                healthStatus = open ? (hc?.LastStatus ?? "Unknown") : "NotRunning";
+                healthStatus = _healthStatusCache.GetDisplayStatus(s.Id, open);
             }
             else
             {
                 runtimeStatus = info?.Status.ToString() ?? "Stopped";
-                healthStatus = info is null ? "NotRunning" : (hc?.LastStatus ?? "Unknown");
+                healthStatus = _healthStatusCache.GetDisplayStatus(s.Id, info is not null);
             }
 
             return new

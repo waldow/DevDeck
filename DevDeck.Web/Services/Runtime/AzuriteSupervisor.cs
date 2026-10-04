@@ -61,13 +61,17 @@ public sealed class AzuriteSupervisor : IAzuriteSupervisor, IAsyncDisposable
                 return new AzuriteReadyResult(true);
             }
 
+            // The process being waited for, held locally: the Exited handler clears _process,
+            // so re-reading it after the wait could never tell that Azurite died.
+            Process? launched;
             if (_process is { HasExited: false } existing)
             {
+                launched = existing;
                 log($"Waiting for Azurite (PID {SafePid(existing)}) to become ready...");
             }
             else
             {
-                var launch = TryLaunch(opts, log);
+                var launch = TryLaunch(opts, log, out launched);
                 if (launch is not null)
                 {
                     return new AzuriteReadyResult(false, launch);
@@ -75,20 +79,26 @@ public sealed class AzuriteSupervisor : IAzuriteSupervisor, IAsyncDisposable
             }
 
             var timeout = TimeSpan.FromSeconds(Math.Max(1, opts.StartupTimeoutSeconds));
-            if (await WaitForPortsAsync(ports, timeout, cancellationToken))
+            switch (await WaitForPortsAsync(ports, timeout, launched, cancellationToken))
             {
-                log("Azurite is ready.");
-                return new AzuriteReadyResult(true);
+                case PortWait.Ready:
+                    log("Azurite is ready.");
+                    return new AzuriteReadyResult(true);
+                case PortWait.ProcessExited:
+                    var code = TryGetExitCode(launched!);
+                    // Untrack it before releasing the handle, so nothing later reads a disposed
+                    // Process from _process (its Exited handler may not have cleared it yet).
+                    if (Interlocked.CompareExchange(ref _process, null, launched) == launched)
+                    {
+                        try { launched!.Dispose(); } catch { /* best-effort */ }
+                    }
+                    return new AzuriteReadyResult(false,
+                        $"Azurite exited during startup{(code is null ? "" : $" with code {code}")} (see {LogFile}); " +
+                        $"is something else already using port {opts.BlobPort}, {opts.QueuePort} or {opts.TablePort}?");
+                default:
+                    return new AzuriteReadyResult(false,
+                        $"Timed out after {timeout.TotalSeconds:0}s waiting for Azurite ports {opts.BlobPort}/{opts.QueuePort}/{opts.TablePort}.");
             }
-
-            if (_process is { HasExited: true })
-            {
-                return new AzuriteReadyResult(false,
-                    $"Azurite exited during startup (see {LogFile}).");
-            }
-
-            return new AzuriteReadyResult(false,
-                $"Timed out after {timeout.TotalSeconds:0}s waiting for Azurite ports {opts.BlobPort}/{opts.QueuePort}/{opts.TablePort}.");
         }
         finally
         {
@@ -97,8 +107,9 @@ public sealed class AzuriteSupervisor : IAzuriteSupervisor, IAsyncDisposable
     }
 
     /// <summary>Returns an error message on failure, or null when the process started.</summary>
-    private string? TryLaunch(AzuriteOptions opts, Action<string> log)
+    private string? TryLaunch(AzuriteOptions opts, Action<string> log, out Process? launched)
     {
+        launched = null;
         var executable = _resolver.ResolveForLaunch(opts.Command);
         Process? process = null;
         try
@@ -124,6 +135,9 @@ public sealed class AzuriteSupervisor : IAzuriteSupervisor, IAsyncDisposable
             psi.ArgumentList.Add(opts.QueuePort.ToString());
             psi.ArgumentList.Add("--tablePort");
             psi.ArgumentList.Add(opts.TablePort.ToString());
+            // Like the services it serves: out of DevDeck's process group, so a Ctrl+C in
+            // DevDeck's terminal doesn't take it down behind DevDeck's back.
+            ProcessSessions.StartInNewSession(psi);
 
             process = new Process { StartInfo = psi, EnableRaisingEvents = true };
             var processLocal = process;
@@ -142,6 +156,7 @@ public sealed class AzuriteSupervisor : IAzuriteSupervisor, IAsyncDisposable
             // Track immediately after Start so a BeginOutputReadLine failure below can't
             // leave a live Azurite running untracked (DisposeAsync would never reach it).
             _process = process;
+            launched = process;
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 
@@ -174,18 +189,36 @@ public sealed class AzuriteSupervisor : IAzuriteSupervisor, IAsyncDisposable
         });
     }
 
-    private static async Task<bool> WaitForPortsAsync(int[] ports, TimeSpan timeout, CancellationToken cancellationToken)
+    private enum PortWait { Ready, ProcessExited, TimedOut }
+
+    // Polls until the ports are up, the launched process dies (a port already taken, a broken
+    // install: no point waiting out the timeout), or the timeout passes.
+    private static async Task<PortWait> WaitForPortsAsync(int[] ports, TimeSpan timeout, Process? launched, CancellationToken cancellationToken)
     {
         var deadline = DateTimeOffset.UtcNow + timeout;
         while (DateTimeOffset.UtcNow < deadline)
         {
             if (await AllPortsOpenAsync(ports, cancellationToken))
             {
-                return true;
+                return PortWait.Ready;
+            }
+            if (launched is not null && SafeHasExited(launched))
+            {
+                return PortWait.ProcessExited;
             }
             await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken);
         }
-        return await AllPortsOpenAsync(ports, cancellationToken);
+        return await AllPortsOpenAsync(ports, cancellationToken) ? PortWait.Ready : PortWait.TimedOut;
+    }
+
+    private static bool SafeHasExited(Process p)
+    {
+        try { return p.HasExited; } catch { return true; }
+    }
+
+    private static int? TryGetExitCode(Process p)
+    {
+        try { return p.ExitCode; } catch { return null; }
     }
 
     private static async Task<bool> AllPortsOpenAsync(int[] ports, CancellationToken cancellationToken)
@@ -222,7 +255,7 @@ public sealed class AzuriteSupervisor : IAzuriteSupervisor, IAsyncDisposable
     }
 
     // Host shutdown. Azurite follows the Functions hosts that depend on it: stopped along with
-    // them under DevDeck:StopServicesOnShutdown, otherwise left running just as they are —
+    // them under DevDeck:StopServicesOnShutdown (the default), otherwise left running just as they are —
     // killing it would break the hosts that outlive DevDeck, and the next DevDeck start finds
     // its ports open and reuses it.
     public async ValueTask DisposeAsync()

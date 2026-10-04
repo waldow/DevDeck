@@ -12,8 +12,12 @@ public sealed class DevDeckOptions
     public int LogTrimAmount { get; set; } = 1000;
     /// <summary>Run log files older than this are deleted by the retention sweep; 0 or negative keeps them forever.</summary>
     public int LogRetentionDays { get; set; } = 14;
-    /// <summary>When true, DevDeck stops all managed services on shutdown instead of leaving them running as orphans.</summary>
-    public bool StopServicesOnShutdown { get; set; } = false;
+    /// <summary>
+    /// When true (the default), DevDeck stops all managed services when it shuts down. When false they
+    /// are left running and re-attached on the next start — but their output pipes end with DevDeck, so
+    /// a service that keeps writing to the console (Node dev servers) exits on its next output line.
+    /// </summary>
+    public bool StopServicesOnShutdown { get; set; } = true;
     public DevDeckReverseProxyOptions ReverseProxy { get; set; } = new();
     public AzuriteOptions Azurite { get; set; } = new();
 }

@@ -6,9 +6,12 @@ public static class GatewayUrlResolver
 {
     public const string DefaultGatewayBaseUrl = "http://localhost:5050";
 
-    public static string ResolveListenUrl(IConfiguration configuration)
+    public static string ResolveListenUrl(IConfiguration configuration) =>
+        Normalize(configuration[$"{DevDeckOptions.SectionName}:ReverseProxy:GatewayBaseUrl"]);
+
+    /// <summary>The gateway origin for a configured GatewayBaseUrl, or the default when it is unusable.</summary>
+    public static string Normalize(string? configured)
     {
-        var configured = configuration[$"{DevDeckOptions.SectionName}:ReverseProxy:GatewayBaseUrl"];
         if (string.IsNullOrWhiteSpace(configured))
         {
             return DefaultGatewayBaseUrl;
@@ -23,6 +26,11 @@ public static class GatewayUrlResolver
 
         return uri.GetLeftPart(UriPartial.Authority);
     }
+
+    /// <summary>True for a bind-to-every-interface host such as 0.0.0.0 or [::].</summary>
+    public static bool IsAnyAddress(string host) =>
+        System.Net.IPAddress.TryParse(host.Trim('[', ']'), out var ip) &&
+        (ip.Equals(System.Net.IPAddress.Any) || ip.Equals(System.Net.IPAddress.IPv6Any));
 
     /// <summary>
     /// True when the listen URL binds only to this machine. A non-loopback bind (0.0.0.0,

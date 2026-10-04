@@ -7,6 +7,7 @@
     var running = (ViewBag.RunningIds as HashSet<int>) ?? new HashSet<int>();
     var conflictPorts = (ViewBag.ConflictPorts as HashSet<int>) ?? new HashSet<int>();
     var pollMs = ViewBag.PollMs as int? ?? 1500;
+    var healthStatuses = (ViewBag.HealthStatuses as Dictionary<int, string>) ?? new Dictionary<int, string>();
 }
 
 @section Actions {
@@ -51,7 +52,7 @@ else
                 var isRunning = running.Contains(s.Id);
                 var isExternal = s.UseExternalInstance;
                 var hasHealth = s.HealthChecks.Any(h => h.Enabled);
-                var healthText = (isRunning || isExternal) ? "Unknown" : "NotRunning";
+                var healthText = healthStatuses.TryGetValue(s.Id, out var health) ? health : ((isRunning || isExternal) ? "Unknown" : "NotRunning");
                 var runtimeText = isExternal ? "External" : (isRunning ? "Running" : "Stopped");
                 var portConflict = s.Port is int prt && conflictPorts.Contains(prt);
                 <tr class="svc-row" data-service-id="@s.Id" data-enabled="@s.Enabled.ToString().ToLowerInvariant()" data-external="@isExternal.ToString().ToLowerInvariant()">

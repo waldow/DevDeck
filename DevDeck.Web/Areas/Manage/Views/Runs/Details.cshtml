@@ -10,6 +10,10 @@
         <dt>Service</dt><dd>@Model.ServiceName</dd>
         <dt>Started</dt><dd>@Model.Run.StartedUtc.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss")</dd>
         <dt>Stopped</dt><dd>@(Model.Run.StoppedUtc?.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss") ?? "—")</dd>
+        @if (Model.Run.StoppedUtc is not null)
+        {
+            <dt>Duration</dt><dd class="mono">@RunTimeFormat.Duration(Model.Run.StoppedUtc - Model.Run.StartedUtc)</dd>
+        }
         <dt>Status</dt><dd><span class="pill pill-@(Model.Run.Status.ToLower())">@Model.Run.Status</span></dd>
         <dt>PID</dt><dd class="mono">@(Model.Run.ProcessId?.ToString() ?? "—")</dd>
         <dt>Exit code</dt><dd class="mono">@(Model.Run.ExitCode?.ToString() ?? "—")</dd>

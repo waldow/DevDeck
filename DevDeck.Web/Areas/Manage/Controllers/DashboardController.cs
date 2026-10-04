@@ -1,6 +1,9 @@
 using DevDeck.Web.Areas.Manage.ViewModels;
 using DevDeck.Web.Data;
+using DevDeck.Web.Data.Entities;
 using DevDeck.Web.Options;
+using DevDeck.Web.Services.Commands;
+using DevDeck.Web.Services.Health;
 using DevDeck.Web.Services.Runtime;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -14,22 +17,27 @@ public sealed class DashboardController : Controller
     private readonly IDbContextFactory<DevDeckDbContext> _dbFactory;
     private readonly IDevDeckProcessManager _manager;
     private readonly IOptions<DevDeckOptions> _options;
+    private readonly HealthStatusCache _healthStatusCache;
+    private readonly CommandTemplateRenderer _renderer;
 
     public DashboardController(
         IDbContextFactory<DevDeckDbContext> dbFactory,
         IDevDeckProcessManager manager,
-        IOptions<DevDeckOptions> options)
+        IOptions<DevDeckOptions> options,
+        HealthStatusCache healthStatusCache,
+        CommandTemplateRenderer renderer)
     {
         _dbFactory = dbFactory;
         _manager = manager;
         _options = options;
+        _healthStatusCache = healthStatusCache;
+        _renderer = renderer;
     }
 
     public async Task<IActionResult> Index()
     {
         await using var db = await _dbFactory.CreateDbContextAsync();
         var services = await db.DevServices.AsNoTracking().OrderBy(s => s.DisplayOrder).ThenBy(s => s.Name).ToListAsync();
-        var healthChecks = await db.ServiceHealthChecks.AsNoTracking().ToListAsync();
         var proxies = await db.ProxyRoutes.AsNoTracking().Where(r => r.Enabled && r.ShowOnDashboard).ToListAsync();
 
         var gateway = _options.Value.ReverseProxy.GatewayBaseUrl.TrimEnd('/');
@@ -37,10 +45,6 @@ public sealed class DashboardController : Controller
         var cards = services.Select(s =>
         {
             var info = _manager.GetRunningProcess(s.Id);
-            var hc = healthChecks
-                .Where(h => h.DevServiceId == s.Id && h.Enabled)
-                .OrderByDescending(h => h.LastCheckedUtc)
-                .FirstOrDefault();
 
             string? proxyUrl = null;
             var route = proxies.FirstOrDefault(p => p.DevServiceId == s.Id);
@@ -59,11 +63,9 @@ public sealed class DashboardController : Controller
                 // Passthru runtime is determined by the polled snapshot's port probe; render an
                 // optimistic "External" initially and let the first tick correct it to "Offline".
                 RuntimeStatus = s.UseExternalInstance ? "External" : (info?.Status.ToString() ?? "Stopped"),
-                HealthStatus = s.UseExternalInstance
-                    ? (hc?.LastStatus ?? "Unknown")
-                    : (info is null ? "NotRunning" : (hc?.LastStatus ?? "Unknown")),
+                HealthStatus = _healthStatusCache.GetDisplayStatus(s.Id, s.UseExternalInstance || info is not null),
                 Port = s.EffectivePort,
-                Url = s.Url,
+                Url = DirectUrl(s),
                 ProxyUrl = proxyUrl,
                 ProcessId = info is null ? null : SafePid(info),
                 RunId = info?.ServiceRunId,
@@ -75,6 +77,24 @@ public sealed class DashboardController : Controller
             Cards = cards,
             PollingMilliseconds = _options.Value.DashboardPollingMilliseconds,
         });
+    }
+
+    // The service URL with {port} etc. filled in, as the proxy and health checks use it — the
+    // stored value is usually the preset's "http://localhost:{port}" template. Null when a
+    // placeholder can't be rendered (e.g. no port), rather than an unusable link.
+    private string? DirectUrl(DevService service)
+    {
+        if (string.IsNullOrWhiteSpace(service.Url))
+        {
+            return null;
+        }
+
+        var rendered = _renderer.Render(
+            service.Url,
+            CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.EffectivePort, service.WorkingDirectory));
+        return rendered.UnknownPlaceholders.Count == 0 && Uri.TryCreate(rendered.Text, UriKind.Absolute, out _)
+            ? rendered.Text
+            : null;
     }
 
     private static int? SafePid(RunningProcessInfo info)

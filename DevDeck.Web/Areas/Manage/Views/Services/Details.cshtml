@@ -20,8 +20,19 @@
             <dt>Type</dt><dd class="mono">@Model.ServiceType</dd>
             <dt>Working dir</dt><dd class="mono dim">@Model.WorkingDirectory</dd>
             <dt>Start command</dt><dd class="mono">@Model.StartCommand @Model.StartArguments</dd>
-            <dt>URL</dt><dd>@(string.IsNullOrEmpty(Model.Url) ? "—" : Model.Url)</dd>
+            <dt>URL</dt>
+            <dd>
+                @(string.IsNullOrEmpty(Model.Url) ? "—" : Model.Url)
+                @if (ViewBag.ResolvedUrl is string resolvedUrl && resolvedUrl != Model.Url)
+                {
+                    <text><span class="dim">→</span> <a href="@resolvedUrl" target="_blank" rel="noopener">@resolvedUrl</a></text>
+                }
+            </dd>
             <dt>Port</dt><dd>@(Model.Port?.ToString() ?? "—")</dd>
+            @if (!string.IsNullOrWhiteSpace(Model.StopCommand))
+            {
+                <dt>Stop command</dt><dd class="mono">@Model.StopCommand @Model.StopArguments</dd>
+            }
             <dt>Enabled</dt><dd>@(Model.Enabled ? "Yes" : "No")</dd>
             <dt>Auto-start</dt><dd>@(Model.AutoStart ? "Yes" : "No")</dd>
         </dl>
@@ -59,7 +70,7 @@
                     <tr>
                         <td><a asp-area="Manage" asp-controller="Runs" asp-action="Details" asp-route-id="@r.Id">#@r.Id</a></td>
                         <td class="dim">@r.StartedUtc.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss")</td>
-                        <td class="dim">@(r.StoppedUtc?.LocalDateTime.ToString("HH:mm:ss") ?? "—")</td>
+                        <td class="dim">@RunTimeFormat.Stopped(r.StartedUtc, r.StoppedUtc)</td>
                         <td><span class="pill pill-@(r.Status.ToLower())">@r.Status</span></td>
                         <td class="mono">@(r.ExitCode?.ToString() ?? "—")</td>
                         <td>@if (!string.IsNullOrEmpty(r.LogFilePath)) { <a asp-area="Manage" asp-controller="Logs" asp-action="Download" asp-route-runId="@r.Id">download</a> }</td>

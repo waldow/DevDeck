@@ -134,3 +134,55 @@ public sealed class HealthStatusCacheTests
         cache.IsHealthy(2).Should().BeFalse();
     }
 }
+
+public sealed class HealthGateTests
+{
+    [Fact]
+    public void A_service_with_no_enabled_check_passes_the_gate_once_the_poller_knows_it()
+    {
+        // Nothing could ever make such a service Healthy, so gating on it would 503 forever once
+        // the post-start warm-up ended.
+        var cache = new HealthStatusCache();
+        cache.IsHealthy(5).Should().BeFalse("before the first poll the checks aren't known yet");
+
+        cache.SetMonitoredServices(new HashSet<int> { 1 });
+
+        cache.IsHealthy(5).Should().BeTrue();
+        cache.IsHealthy(1).Should().BeFalse("service 1 has a check but no result yet");
+    }
+
+    [Fact]
+    public void Display_status_is_the_gate_aggregate_while_up_and_NotRunning_otherwise()
+    {
+        var cache = new HealthStatusCache();
+        cache.Set(1, 10, HealthStatusNames.Healthy);
+        cache.Set(1, 11, HealthStatusNames.Unhealthy);
+
+        cache.GetDisplayStatus(1, isUp: true).Should().Be(HealthStatusNames.Unhealthy);
+        cache.GetDisplayStatus(1, isUp: false).Should().Be(HealthStatusNames.NotRunning);
+    }
+
+    [Fact]
+    public void A_check_with_no_result_since_the_service_stopped_is_due_at_once()
+    {
+        // Regression: due-ness came from the persisted LastCheckedUtc, so after a restart a
+        // check with a long interval waited out the rest of it with no result, and the gate
+        // read Unknown (503) once the warm-up ended.
+        var cache = new HealthStatusCache();
+        var now = DateTimeOffset.UtcNow;
+        var check = new DevDeck.Web.Data.Entities.ServiceHealthCheck
+        {
+            Id = 10, DevServiceId = 1, Url = "http://localhost:1/", IntervalSeconds = 60,
+            LastCheckedUtc = now.AddSeconds(-1), LastStatus = HealthStatusNames.Healthy,
+        };
+
+        HealthCheckBackgroundService.IsDue(cache, check, now).Should().BeTrue();
+
+        cache.Set(1, 10, HealthStatusNames.Healthy, now);
+        HealthCheckBackgroundService.IsDue(cache, check, now.AddSeconds(30)).Should().BeFalse();
+        HealthCheckBackgroundService.IsDue(cache, check, now.AddSeconds(60)).Should().BeTrue();
+
+        cache.RemoveService(1);
+        HealthCheckBackgroundService.IsDue(cache, check, now.AddSeconds(31)).Should().BeTrue();
+    }
+}

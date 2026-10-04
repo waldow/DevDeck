@@ -82,7 +82,8 @@ DevDeck collapses that into one UI. Logs stream into a single panel. Health pill
 - Start, stop, restart, and watch any local command (`npm run dev`, `func start`, `dotnet run`, `docker compose up`, custom binaries).
 - **Start all / Stop all** from the dashboard — a staggered ignite / power-down cascade animates cards as they come up and go down.
 - Per-service environment variables, with **secret masking** in the UI.
-- **Process-tree kill** on stop — `npm` and all its children go down together.
+- **Whole-tree stop** — `npm` and everything under it go down together: a graceful signal first (SIGTERM to the service's own process group on Linux/macOS, Ctrl+C on Windows), an optional **stop command** (e.g. `docker compose stop`), then a force-kill of anything still running after `StopTimeoutSeconds`.
+- Services are stopped when DevDeck shuts down; any it leaves behind (it was killed, or you turned `StopServicesOnShutdown` off) are **re-attached** on its next start — shown as running, proxied to, stoppable, never launched twice.
 - Run history per service: start/stop timestamps, exit codes, downloadable logs.
 
 **📦 Launch profiles**
@@ -99,7 +100,8 @@ DevDeck collapses that into one UI. Logs stream into a single panel. Health pill
 <td width="50%" valign="top">
 
 **❤️ Health & port awareness**
-- HTTP health checks on a background interval, with `Healthy` / `Unhealthy` / `Timeout` / `NotRunning` states.
+- HTTP health checks on a background interval, with `Healthy` / `Unhealthy` / `Timeout` / `NotRunning` states (`Warming` for the first 15 s after a start).
+- One health verdict everywhere: the pills show exactly what a "require healthy destination" route checks (all of a service's checks; a service with no checks is never blocked).
 - Port probes warn when a configured port is already in use.
 
 **🔀 Reverse proxy (YARP) — first class**
@@ -151,7 +153,7 @@ Create service → Start → See logs → Stop → See run history
 
 ## 🧩 Service presets
 
-When you create a service, pick a preset to pre-fill the command, default port, URL, and health check. Every field stays editable, and arguments support the placeholders `{id}`, `{name}`, `{port}`, `{workingDirectory}`.
+When you create a service, pick a preset to pre-fill the command, default port, URL, and health check. Every field stays editable, and arguments support the placeholders `{id}`, `{name}`, `{port}`, `{workingDirectory}` — a value with spaces is quoted for you, so it stays one argument (`${NAME}` is left alone for your shell). The start command can be a name on `PATH`, an absolute path, or a path relative to the working directory (`./run.sh`).
 
 | Preset | Start command | Default port | Notes |
 | --- | --- | --- | --- |
@@ -160,7 +162,7 @@ When you create a service, pick a preset to pre-fill the command, default port, 
 | **React (CRA)** | `npm start` | `3000` | sets `PORT={port}` env var |
 | **Node API** | `npm run dev` | `3001` | health check `…/health` |
 | **.NET API** | `dotnet run --urls http://localhost:{port}` | `5080` | health check `…/health` |
-| **Docker Compose** | `docker compose up` | — | |
+| **Docker Compose** | `docker compose up` | — | stop command `docker compose stop` |
 | **Custom** | *(you provide)* | — | bring your own binary |
 
 Unknown placeholders are left intact with a UI warning rather than silently emptied.
@@ -177,7 +179,7 @@ Three routes give you a single-origin stack:
 | `/api/{**catch-all}` | `http://localhost:5080/` | `None` | `http://localhost:5050/api/weather` |
 | `/functions/{**catch-all}` | `http://localhost:7071/` | `RemoveAndAddPrefix /functions → /api` | `http://localhost:5050/functions/ping` |
 
-Your browser sees one origin — `http://localhost:5050` — so CORS gets out of the way. Edits hot-reload into the live YARP snapshot without restarting DevDeck.
+Your browser sees one origin — `http://localhost:5050` — so CORS gets out of the way. Edits hot-reload into the live YARP snapshot without restarting DevDeck. The gateway adds no request-size limit of its own, so large uploads behave as they do against the service directly.
 
 Each forwarded request is logged straight into the target service's log stream as a `[PRX]` pair — an inbound line and an outbound line carrying the response status, latency, and size:
 
@@ -187,6 +189,8 @@ Each forwarded request is logged straight into the target service's log stream a
 ```
 
 > ⚠️ A catch-all route — any match path with no literal segment, such as `/`, `/{**catch-all}` or `/{**path}` — for a SPA fallback is **disabled by default**. Enable `DevDeck:ReverseProxy:AllowCatchAllRoutes` to use one — otherwise the route is persisted but skipped (with a warning) when the proxy config is built.
+
+The route editor (and the importer) refuse a route that could only fail: Match hosts that aren't `host` / `host:port` (no scheme, no brackets), unknown route constraints (`{id:integer}`), a destination that is the gateway itself, an authorization policy other than blank/`Anonymous` (DevDeck has no authentication), or a route that matches exactly the same requests as another one with the same **Order** — give one of them a lower Order to make it win. Match hosts other than `localhost` / `*.localhost` must also be listed in [`AllowedHosts`](#-safety-model).
 
 ---
 
@@ -260,6 +264,7 @@ Settings live in `DevDeck.Web/appsettings.json` under the `DevDeck` section:
   "DevDeck": {
     "DevelopmentOnly": true,
     "AutoStartEnabledServices": false,
+    "StopServicesOnShutdown": true,
     "StopTimeoutSeconds": 10,
     "DashboardPollingMilliseconds": 1500,
     "MaxLiveLogLinesPerService": 5000,
@@ -280,11 +285,12 @@ Settings live in `DevDeck.Web/appsettings.json` under the `DevDeck` section:
 | Key | Default | What it does |
 | --- | --- | --- |
 | `DevelopmentOnly` | `true` | Gate management/execution actions behind a Development environment. |
-| `AutoStartEnabledServices` | `false` | Start enabled services automatically on launch. |
-| `StopTimeoutSeconds` | `10` | Grace period before a process tree is force-killed. |
+| `AutoStartEnabledServices` | `false` | Start enabled services automatically once DevDeck is listening. |
+| `StopServicesOnShutdown` | `true` | Stop every managed service (and a DevDeck-launched Azurite) when DevDeck shuts down. Turn it off to leave them running and have them re-attached on the next start — but a service's console output went through DevDeck, so one that keeps writing (Vite, CRA and other Node dev servers) exits on its next output line once DevDeck is gone; .NET hosts, `func` and quiet processes keep running. |
+| `StopTimeoutSeconds` | `10` | How long a service's stop command may run, and then how long the process tree gets to exit after the graceful signal before it is force-killed. |
 | `DashboardPollingMilliseconds` | `1500` | Dashboard status poll interval. |
 | `MaxLiveLogLinesPerService` / `LogTrimAmount` | `5000` / `1000` | Ring-buffer size and trim step. |
-| `LogRetentionDays` | `14` | Age after which on-disk log files are pruned. |
+| `LogRetentionDays` | `14` | Age after which on-disk log files are pruned (a still-running service's log is kept). |
 | `ReverseProxy.GatewayBaseUrl` | `http://localhost:5050` | The single origin DevDeck (and the gateway) bind to. |
 | `ReverseProxy.AllowExternalDestinations` | `false` | Permit proxy destinations outside localhost/private networks. |
 | `ReverseProxy.AllowCatchAllRoutes` | `false` | Permit catch-all SPA-fallback routes (`/`, `/{**catch-all}`, or any match path with no literal segment). Reserved paths such as `/Manage` are never proxied either way. |
@@ -292,6 +298,8 @@ Settings live in `DevDeck.Web/appsettings.json` under the `DevDeck` section:
 | `ReverseProxy.LogProxyRequests` | `true` | Log each proxied request as a `PRX` line pair — inbound request + outbound response (status, latency, size) — in the target service's log stream. |
 
 `AllowExternalDestinations` is off by default — routes are restricted to `localhost`, `127.0.0.1`, `::1`, `*.localhost`, and RFC 1918 private networks (`10/8`, `172.16/12`, `192.168/16`). Flip it on only if you genuinely need to proxy something external.
+
+`AllowedHosts` (top level, outside the `DevDeck` section) lists the host names DevDeck answers to — by default `localhost;*.localhost;127.0.0.1;[::1]`; the loopback names and a concrete `GatewayBaseUrl` host are always added. Requests for any other host get HTTP 400. If a proxy route matches on another host name (say `api.mydev.test`), add it here.
 
 ---
 
@@ -305,6 +313,7 @@ DevDeck spawns arbitrary local processes and exposes a reverse proxy, so a few r
 - **Catch-all routes are disabled** unless `AllowCatchAllRoutes` is explicitly set.
 - **Destinations default to localhost / private networks**; public hosts require `AllowExternalDestinations`.
 - **Secrets** (env vars marked `IsSecret`) are masked in the UI and never logged.
+- **Only its own host names.** DevDeck has no authentication, so it rejects requests whose `Host` isn't in `AllowedHosts` (loopback by default). That stops a malicious web page from using DNS rebinding — making its own host name resolve to `127.0.0.1` — to drive DevDeck from your browser. Don't set `AllowedHosts` to `*`.
 
 DevDeck is designed for **local development only** — it isn't a production process manager or ingress gateway.
 
@@ -319,7 +328,7 @@ dotnet run --project DevDeck.Web                        # launch on http://local
 dotnet ef migrations add <Name> --project DevDeck.Web -o Migrations
 ```
 
-The `DevDeck.Tests` project covers the cross-platform-sensitive bits: command template rendering, executable resolution for both OSes, log buffer trim behavior, reverse-proxy transform building, reserved-path rejection, destination validation, and import/export round-trips.
+The `DevDeck.Tests` project covers the cross-platform-sensitive bits: command template rendering and argument quoting, executable resolution for both OSes, log buffer trim behavior, reverse-proxy transform building and route validation (including a real Kestrel + YARP host), reserved-path rejection, destination validation, import/export round-trips, and real process trees being stopped and re-attached (POSIX tests, plus a Windows Ctrl+C test) — run it on each OS you change runtime code for.
 
 > 🤖 Working with an AI assistant? [`CLAUDE.md`](CLAUDE.md) (and the mirrored [`AGENTS.md`](AGENTS.md)) capture the architecture, milestone order, and safety constraints agents should follow.
 

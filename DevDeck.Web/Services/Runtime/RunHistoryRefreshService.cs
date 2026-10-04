@@ -74,25 +74,28 @@ public sealed class RunHistoryRefreshService
         {
             if (trackedByRunId.TryGetValue(run.Id, out var info))
             {
-                // Tracked runs are finalized by the process manager's exit handler; here they
-                // are only kept in sync while the process is alive. An exited or not-yet-started
-                // process is left alone: completing it would race the handler, and once the
-                // handler has disposed the Process its exit code reads as null (so a clean exit
-                // would be recorded as Crashed).
+                // Tracked runs are finalized by the process manager's exit handler, and their
+                // Stopping is written by the stop path; here only what the start sequence may
+                // have failed to record is filled in (Starting -> Running, the PID). An exited or
+                // not-yet-started process is left alone. The write is conditional on the run
+                // still being open and not stopping, so it can never land on top of a stop or
+                // the handler's final status, whichever order the writes commit in.
                 if (!IsAlive(info.Process))
                 {
                     continue;
                 }
 
-                var refreshedStatus = ProcessStatusNames.FromStatus(info.Status);
-                if (!string.Equals(run.Status, refreshedStatus, StringComparison.Ordinal) ||
-                    run.StoppedUtc is not null ||
-                    run.ProcessId is null)
+                var promote = info.Status == ProcessStatus.Running &&
+                              string.Equals(run.Status, ProcessStatusNames.Starting, StringComparison.Ordinal);
+                var processId = run.ProcessId ?? TryGetProcessId(info.Process);
+                if (promote || (run.ProcessId is null && processId is not null))
                 {
-                    run.Status = refreshedStatus;
-                    run.StoppedUtc = null;
-                    run.ProcessId ??= TryGetProcessId(info.Process);
-                    changed++;
+                    var status = promote ? ProcessStatusNames.Running : run.Status;
+                    changed += await db.ServiceRuns
+                        .Where(r => r.Id == run.Id && r.StoppedUtc == null && r.Status != ProcessStatusNames.Stopping)
+                        .ExecuteUpdateAsync(set => set
+                            .SetProperty(r => r.Status, status)
+                            .SetProperty(r => r.ProcessId, processId), cancellationToken);
                 }
                 continue;
             }
@@ -109,6 +112,7 @@ public sealed class RunHistoryRefreshService
             if (run.ProcessId is int pid && RunProcessMatcher.IsSameRunProcessStillAlive(
                     pid,
                     run.StartedUtc,
+                    run.ProcessStartKey,
                     ex => _logger.LogDebug(ex, "Could not inspect process {ProcessId} while refreshing run history", pid)))
             {
                 if (!string.Equals(run.Status, ProcessStatusNames.Running, StringComparison.Ordinal) ||

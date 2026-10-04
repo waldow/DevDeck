@@ -119,7 +119,7 @@ code, pre, .mono { font-family: var(--mono); }
 .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 500; letter-spacing: 0.3px; }
 .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
 .pill-running, .pill-healthy { background: var(--ok-bg); color: var(--ok); }
-.pill-starting, .pill-info { background: var(--info-bg); color: var(--info); }
+.pill-starting, .pill-warming, .pill-info { background: var(--info-bg); color: var(--info); }
 .pill-stopping, .pill-unhealthy, .pill-timeout, .pill-warn { background: var(--warn-bg); color: var(--warn); }
 .pill-stopped, .pill-notrunning, .pill-unknown, .pill-offline { background: var(--mute-bg); color: var(--text-dim); }
 .pill-crashed, .pill-failedtostart, .pill-killed { background: var(--bad-bg); color: var(--bad); }
@@ -170,6 +170,13 @@ input[type=text], input[type=number], input[type=url], input[type=email], input[
 input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-glow); outline-offset: 1px; border-color: var(--accent); }
 input[type=checkbox] { accent-color: var(--accent); }
 .field-validation-error, .text-danger { color: var(--bad); font-size: 12px; }
+.field-validation-valid { display: none; }
+input.input-validation-error, select.input-validation-error, textarea.input-validation-error { border-color: var(--bad); }
+/* Every validation error of a failed save, so none of them can go unseen (row fields, model-level errors). */
+.validation-summary-errors { background: var(--bad-bg); border: 1px solid rgba(248,113,113,0.35); color: #ffd6d6;
+    border-radius: var(--radius-sm); padding: 10px 14px; margin-bottom: 18px; font-size: 13px; }
+.validation-summary-errors ul { margin: 0; padding-left: 18px; }
+.validation-summary-valid { display: none; }
 .form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--border-soft); }
 fieldset { border: 1px solid var(--border-soft); border-radius: var(--radius); padding: 14px 18px; margin: 0; }
 legend { color: var(--text-dim); padding: 0 8px; font-size: 12px; letter-spacing: 0.6px; text-transform: uppercase; }

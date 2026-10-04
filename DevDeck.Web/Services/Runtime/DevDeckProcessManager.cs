@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using DevDeck.Web.Data;
 using DevDeck.Web.Data.Entities;
 using DevDeck.Web.Options;
@@ -16,6 +15,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
 {
     private readonly ConcurrentDictionary<int, RunningProcessInfo> _running = new();
     private readonly ConcurrentDictionary<int, SemaphoreSlim> _serviceLocks = new();
+    private volatile bool _shuttingDown;
     private readonly IDbContextFactory<DevDeckDbContext> _dbFactory;
     private readonly ProcessLogBuffer _logBuffer;
     private readonly LogFileWriter _logFileWriter;
@@ -33,11 +33,21 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
     private const string AzureWebJobsStorageDevelopmentValue = "UseDevelopmentStorage=true";
 
     private static readonly TimeSpan PostStartHealthWarmup = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan MinimumStopGrace = TimeSpan.FromSeconds(2);
     private static readonly string[] ActiveStatuses =
     [
         ProcessStatusNames.Starting,
         ProcessStatusNames.Running,
         ProcessStatusNames.Stopping,
+    ];
+
+    // DevDeck's own hosting settings (e.g. the ASPNETCORE_URLS `dotnet run` sets from its launch
+    // profile). Inherited by an ASP.NET Core service, they would bind it to DevDeck's URL instead
+    // of its own port — so a service only gets them when it sets them itself.
+    private static readonly string[] DevDeckHostingVariables =
+    [
+        "ASPNETCORE_URLS", "ASPNETCORE_HTTP_PORTS", "ASPNETCORE_HTTPS_PORTS",
+        "DOTNET_URLS", "DOTNET_HTTP_PORTS", "DOTNET_HTTPS_PORTS",
     ];
 
     public DevDeckProcessManager(
@@ -80,6 +90,19 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
 
     public void ClearLiveLogs(int serviceId) => _logBuffer.Clear(serviceId);
 
+    /// <summary>
+    /// Host shutdown has begun: refuse every start from now on (auto-start, a request still in
+    /// flight), including one already underway but not yet launched, so nothing is launched
+    /// after — and missed by — the shutdown Stop-all.
+    /// </summary>
+    public void BeginShutdown() => _shuttingDown = true;
+
+    private const string ShuttingDownError = "DevDeck is shutting down.";
+
+    // Lifecycle operations (start, stop, restart and the batch forms of them) run to completion
+    // once begun: the caller's token is not honoured, because an HTTP request aborted halfway
+    // (the user navigating away to watch the logs) must not leave a run half-started, a stop
+    // half-done, or a restart turned into a stop. Every wait inside is bounded by a timeout.
     public async Task<StartServiceResult> StartServiceAsync(int serviceId, CancellationToken cancellationToken)
     {
         if (!ExecutionAllowed())
@@ -88,10 +111,10 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
         }
 
         var serviceLock = _serviceLocks.GetOrAdd(serviceId, _ => new SemaphoreSlim(1, 1));
-        await serviceLock.WaitAsync(cancellationToken);
+        await serviceLock.WaitAsync(CancellationToken.None);
         try
         {
-            return await StartServiceCoreAsync(serviceId, cancellationToken);
+            return await StartServiceCoreAsync(serviceId);
         }
         finally
         {
@@ -100,17 +123,21 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
     }
 
     // Callers must hold the per-service lock.
-    private async Task<StartServiceResult> StartServiceCoreAsync(int serviceId, CancellationToken cancellationToken)
+    private async Task<StartServiceResult> StartServiceCoreAsync(int serviceId)
     {
+        if (_shuttingDown)
+        {
+            return new StartServiceResult { ServiceId = serviceId, Success = false, Error = ShuttingDownError };
+        }
         if (_running.ContainsKey(serviceId))
         {
             return new StartServiceResult { ServiceId = serviceId, Success = false, Error = "Service is already running." };
         }
 
-        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var db = await _dbFactory.CreateDbContextAsync();
         var service = await db.DevServices
             .Include(s => s.EnvironmentVariables)
-            .FirstOrDefaultAsync(s => s.Id == serviceId, cancellationToken);
+            .FirstOrDefaultAsync(s => s.Id == serviceId);
 
         if (service is null)
         {
@@ -124,20 +151,33 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
         {
             return new StartServiceResult { ServiceId = serviceId, Success = false, Error = $"'{service.Name}' uses an external instance on port {service.EffectivePort}; DevDeck does not launch it." };
         }
+
+        // An instance an earlier DevDeck session launched may still be running: that is this
+        // service, running — take it back under management instead of launching a duplicate
+        // that would fight it for its port.
+        if (await TryAdoptLiveRunAsync(db, service) is { } adopted)
+        {
+            return new StartServiceResult
+            {
+                ServiceId = serviceId,
+                RunId = adopted.ServiceRunId,
+                Success = false,
+                Error = $"Service is already running (PID {SafePid(adopted.Process)}, left running by an earlier DevDeck session).",
+            };
+        }
+
         if (!Directory.Exists(service.WorkingDirectory))
         {
             return new StartServiceResult { ServiceId = serviceId, Success = false, Error = $"Working directory does not exist: {service.WorkingDirectory}" };
         }
 
         var values = CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.Port, service.WorkingDirectory);
-        var argsRender = _renderer.Render(service.StartArguments, values);
+        var argsRender = _renderer.RenderArguments(service.StartArguments, values);
         var resolvedCommand = _resolver.Resolve(service.StartCommand);
-        var renderedEnvironment = service.EnvironmentVariables
-            .Select(env => new RenderedEnvironmentVariable(env.Key, _renderer.Render(env.Value, values).Text, env.IsSecret))
-            .ToList();
+        var renderedEnvironment = RenderEnvironment(service, values);
         var isAzureFunction = IsAzureFunctionServiceType(service.ServiceType);
         AddAzureFunctionsDefaults(renderedEnvironment, isAzureFunction);
-        var launchCommand = _resolver.ResolveForLaunch(service.StartCommand, EffectivePathValue(renderedEnvironment));
+        var launchCommand = _resolver.ResolveForLaunch(service.StartCommand, EffectivePathValue(renderedEnvironment), service.WorkingDirectory);
 
         var run = new ServiceRun
         {
@@ -149,28 +189,38 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
             WorkingDirectorySnapshot = service.WorkingDirectory,
         };
         db.ServiceRuns.Add(run);
-        await db.SaveChangesAsync(cancellationToken);
+        await db.SaveChangesAsync();
 
         var logPath = DevDeckPaths.LogFilePathFor(service.Name, run.Id, run.StartedUtc);
         run.LogFilePath = logPath;
-        await db.SaveChangesAsync(cancellationToken);
+        await db.SaveChangesAsync();
 
         // Azure Functions need AzureWebJobsStorage (Azurite locally) and fail on startup
         // without it — ensure the emulator is healthy before launching the Functions host.
         if (isAzureFunction)
         {
-            AppendSystemLine(service.Id, run.Id, logPath, "Ensuring Azurite storage emulator is running...");
-            var azurite = await _azuriteSupervisor.EnsureRunningAsync(
-                msg => AppendSystemLine(service.Id, run.Id, logPath, msg), cancellationToken);
+            AzuriteReadyResult azurite;
+            try
+            {
+                AppendSystemLine(service.Id, run.Id, logPath, "Ensuring Azurite storage emulator is running...");
+                azurite = await _azuriteSupervisor.EnsureRunningAsync(
+                    msg => AppendSystemLine(service.Id, run.Id, logPath, msg), CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                azurite = new AzuriteReadyResult(false, ex.Message);
+            }
+
             if (!azurite.Success)
             {
-                run.Status = ProcessStatusNames.FailedToStart;
-                run.StoppedUtc = DateTimeOffset.UtcNow;
-                run.LastError = azurite.Error;
-                await db.SaveChangesAsync(cancellationToken);
-                AppendSystemLine(service.Id, run.Id, logPath, $"Azurite not ready: {azurite.Error}");
-                return new StartServiceResult { ServiceId = serviceId, RunId = run.Id, Success = false, Error = azurite.Error };
+                return await FailRunAsync(db, run, logPath, $"Azurite not ready: {azurite.Error}", azurite.Error ?? "Azurite not ready.");
             }
+        }
+
+        // Shutdown may have begun while Azurite was coming up.
+        if (_shuttingDown)
+        {
+            return await FailRunAsync(db, run, logPath, $"Not launched: {ShuttingDownError}", ShuttingDownError);
         }
 
         var psi = new ProcessStartInfo
@@ -185,10 +235,18 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
             CreateNoWindow = true,
         };
 
+        foreach (var name in DevDeckHostingVariables)
+        {
+            if (!renderedEnvironment.Any(e => string.Equals(e.Key, name, StringComparison.OrdinalIgnoreCase)))
+            {
+                psi.Environment.Remove(name);
+            }
+        }
         foreach (var env in renderedEnvironment)
         {
-            psi.EnvironmentVariables[env.Key] = env.Value;
+            psi.Environment[env.Key] = env.Value;
         }
+        var ownSession = ProcessSessions.StartInNewSession(psi);
 
         var serviceIdLocal = service.Id;
         var runIdLocal = run.Id;
@@ -217,12 +275,15 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
             };
             process.Exited += async (_, _) =>
             {
+                // Whether a stop was underway when the process exited, read at the exit itself:
+                // a Stop that arrives just after a crash must not relabel the crash as Stopped.
+                var stopRequested = info?.Status == ProcessStatus.Stopping;
                 // async void event handler: an escaping exception is unhandled and
                 // would take down the whole host, so nothing may run outside this try.
                 try
                 {
                     await startGate.Task;
-                    await HandleProcessExitedAsync(serviceIdLocal, runIdLocal, logPathLocal, process, info);
+                    await HandleProcessExitedAsync(serviceIdLocal, runIdLocal, logPathLocal, process, info, stopRequested);
                 }
                 catch (Exception ex)
                 {
@@ -246,12 +307,17 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
             {
                 process.Dispose();
                 startGate.TrySetResult();
-                return new StartServiceResult { ServiceId = service.Id, RunId = run.Id, Success = false, Error = "Service is already running." };
+                return await FailRunAsync(db, run, logPath, "Service is already running.", "Service is already running.");
             }
 
             AppendLaunchDiagnostics(service.Id, run.Id, logPath, resolvedCommand, launchCommand, argsRender.Text,
                 service.WorkingDirectory, renderedEnvironment);
             process.Start();
+            if (ownSession)
+            {
+                // setsid made the process the leader of a new group whose id is its PID.
+                info.ProcessGroup = SafePid(process);
+            }
         }
         catch (Exception ex)
         {
@@ -261,23 +327,20 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
             }
             process.Dispose();
             startGate.TrySetResult();
-            run.Status = ProcessStatusNames.FailedToStart;
-            run.StoppedUtc = DateTimeOffset.UtcNow;
-            run.LastError = ex.Message;
-            await db.SaveChangesAsync(CancellationToken.None);
-            AppendSystemLine(service.Id, run.Id, logPath, $"Failed to start: {ex.Message}");
-            return new StartServiceResult { ServiceId = serviceId, RunId = run.Id, Success = false, Error = ex.Message };
+            return await FailRunAsync(db, run, logPath, $"Failed to start: {ex.Message}", ex.Message);
         }
 
-        // The process is live from here on, so nothing below may bail out early: an aborted
-        // request must not leave a tracked process whose output pipes are never drained (it
-        // would block once the pipe buffer fills). Hence no caller token, and failures are
-        // only logged.
+        // The process is live from here on, so nothing below may bail out early: a tracked
+        // process whose output pipes are never drained would block once the pipe buffer fills.
+        // Failures are only logged.
         try
         {
             info.Status = ProcessStatus.Running;
             run.Status = ProcessStatusNames.Running;
             run.ProcessId = SafePid(process);
+            run.ProcessStartKey = run.ProcessId is int startedPid && ProcessTree.TryGetIdentity(startedPid, out var identity)
+                ? identity.StartKey
+                : null;
             try
             {
                 await db.SaveChangesAsync(CancellationToken.None);
@@ -300,7 +363,8 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
                 _logger.LogWarning(ex, "Failed to begin stream read for service {ServiceId}", serviceIdLocal);
             }
 
-            AppendSystemLine(service.Id, run.Id, logPath, $"Process started with PID {run.ProcessId}");
+            AppendSystemLine(service.Id, run.Id, logPath, $"Process started with PID {run.ProcessId}" +
+                (ownSession ? " in its own process group" : string.Empty));
             if (argsRender.UnknownPlaceholders.Count > 0)
             {
                 AppendSystemLine(service.Id, run.Id, logPath,
@@ -321,6 +385,26 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
         };
     }
 
+    // Records a start that failed before (or while) launching the process, and releases the
+    // run's log file: no exit handler will ever run for it.
+    private async Task<StartServiceResult> FailRunAsync(DevDeckDbContext db, ServiceRun run, string logPath, string logLine, string error)
+    {
+        run.Status = ProcessStatusNames.FailedToStart;
+        run.StoppedUtc = DateTimeOffset.UtcNow;
+        run.LastError = error;
+        try
+        {
+            await db.SaveChangesAsync(CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to record ServiceRun {RunId} as failed to start", run.Id);
+        }
+        AppendSystemLine(run.DevServiceId, run.Id, logPath, logLine);
+        _logFileWriter.Close(logPath, allowReopen: false);
+        return new StartServiceResult { ServiceId = run.DevServiceId, RunId = run.Id, Success = false, Error = error };
+    }
+
     public async Task<StopServiceResult> StopServiceAsync(int serviceId, CancellationToken cancellationToken)
     {
         if (!ExecutionAllowed())
@@ -329,10 +413,10 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
         }
 
         var serviceLock = _serviceLocks.GetOrAdd(serviceId, _ => new SemaphoreSlim(1, 1));
-        await serviceLock.WaitAsync(cancellationToken);
+        await serviceLock.WaitAsync(CancellationToken.None);
         try
         {
-            return await StopServiceCoreAsync(serviceId, cancellationToken);
+            return await StopServiceCoreAsync(serviceId);
         }
         finally
         {
@@ -340,68 +424,150 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
         }
     }
 
-    // Callers must hold the per-service lock. The Exited handler disposes the Process
-    // object concurrently, so every touch goes through the Safe* helpers.
-    private async Task<StopServiceResult> StopServiceCoreAsync(int serviceId, CancellationToken cancellationToken)
+    // Callers must hold the per-service lock. Stops the tracked process, then anything an
+    // earlier DevDeck session left running for the service.
+    private async Task<StopServiceResult> StopServiceCoreAsync(int serviceId)
     {
-        if (!_running.TryGetValue(serviceId, out var info))
+        StopServiceResult? tracked = null;
+        if (_running.TryGetValue(serviceId, out var info))
         {
-            return await StopOrphanedServiceRunAsync(serviceId, cancellationToken);
+            tracked = await StopTrackedAsync(info);
         }
 
+        var orphans = await StopOrphanedServiceRunsAsync(serviceId, excludeRunId: info?.ServiceRunId);
+        if (tracked is null)
+        {
+            return orphans;
+        }
+        if (orphans.NothingToStop)
+        {
+            return tracked;
+        }
+
+        return new StopServiceResult
+        {
+            ServiceId = serviceId,
+            RunId = tracked.RunId,
+            Success = tracked.Success && orphans.Success,
+            Message = $"{tracked.Message ?? tracked.Error}; {orphans.Message ?? orphans.Error}",
+        };
+    }
+
+    // The Exited handler disposes the Process object concurrently, so every touch goes
+    // through the Safe* helpers (inside ProcessTerminator too).
+    private async Task<StopServiceResult> StopTrackedAsync(RunningProcessInfo info)
+    {
+        var serviceId = info.DevServiceId;
         info.Status = ProcessStatus.Stopping;
         AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, "Stop requested");
-        await MarkRunStatusAsync(info.ServiceRunId, ProcessStatusNames.Stopping, cancellationToken);
+        await MarkRunStoppingAsync(info.ServiceRunId);
 
         var timeout = TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.StopTimeoutSeconds));
-        var exited = false;
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        var outcome = new StopOutcome(false, false, 0);
         try
         {
-            // Once a stop is underway it must run to completion (including the kill
-            // fallback) even if the HTTP request that triggered it is aborted — otherwise
-            // an aborted Stop-all would leave a live process pinned at "Stopping" forever.
-            // So the process waits below use CancellationToken.None and rely on timeouts.
-            if (!SafeHasExited(info.Process))
-            {
-                var signalled = TrySendGracefulShutdown(info.Process, serviceId, info.ServiceRunId, info.LogFilePath);
-                if (signalled)
-                {
-                    exited = await WaitForExitAsync(info.Process, timeout, CancellationToken.None);
-                }
-            }
-            else
-            {
-                exited = true;
-            }
-
-            if (!exited && !SafeHasExited(info.Process))
-            {
-                info.KillIssued = true;
-                AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, "Killing process tree");
-                info.Process.Kill(entireProcessTree: true);
-                exited = await WaitForExitAsync(info.Process, TimeSpan.FromSeconds(5), CancellationToken.None);
-            }
+            await RunStopCommandAsync(info, timeout);
+            var grace = deadline - DateTimeOffset.UtcNow;
+            outcome = await ProcessTerminator.StopTreeAsync(
+                info.Process,
+                info.ProcessGroup,
+                grace > MinimumStopGrace ? grace : MinimumStopGrace,
+                line => AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, line),
+                () => info.KillIssued = true);
         }
         catch (Exception ex)
         {
             AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, $"Error stopping process: {ex.Message}");
         }
 
-        var stopped = exited || SafeHasExited(info.Process);
+        var stopped = outcome.Exited || SafeHasExited(info.Process);
         if (stopped)
         {
             // The Exited handler finalizes the run and then clears the running map; wait
             // for it so callers (Restart, shutdown Stop-all) observe a finished run rather
             // than racing a still-pending DB update or a stale "already running".
-            await WaitForRunningRemovalAsync(serviceId, TimeSpan.FromSeconds(5), CancellationToken.None);
+            await WaitForRunningRemovalAsync(serviceId, TimeSpan.FromSeconds(5));
         }
         return new StopServiceResult
         {
             ServiceId = serviceId,
             RunId = info.ServiceRunId,
             Success = stopped,
-            Message = stopped ? "Stopped" : "Timed out waiting for exit",
+            Message = !stopped
+                ? "Timed out waiting for exit"
+                : outcome.LeftoversKilled > 0
+                    ? $"Stopped (killed {outcome.LeftoversKilled} process(es) it left behind)"
+                    : "Stopped",
         };
+    }
+
+    /// <summary>
+    /// Runs the service's configured stop command (e.g. <c>docker compose stop</c>) in its
+    /// working directory, before the process is signalled, for tools whose clean shutdown needs
+    /// more than a signal. Its output goes to the service's log.
+    /// </summary>
+    private async Task RunStopCommandAsync(RunningProcessInfo info, TimeSpan timeout)
+    {
+        DevService? service;
+        await using (var db = await _dbFactory.CreateDbContextAsync())
+        {
+            service = await db.DevServices
+                .Include(s => s.EnvironmentVariables)
+                .AsNoTracking()
+                .FirstOrDefaultAsync(s => s.Id == info.DevServiceId);
+        }
+        if (service is null || string.IsNullOrWhiteSpace(service.StopCommand) || !Directory.Exists(service.WorkingDirectory))
+        {
+            return;
+        }
+
+        void Log(string stream, string text) => WriteLine(info.DevServiceId, info.ServiceRunId, info.LogFilePath, stream, text);
+
+        var values = CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.Port, service.WorkingDirectory);
+        var environment = RenderEnvironment(service, values);
+        AddAzureFunctionsDefaults(environment, IsAzureFunctionServiceType(service.ServiceType));
+        var command = _resolver.ResolveForLaunch(service.StopCommand, EffectivePathValue(environment), service.WorkingDirectory);
+        var arguments = _renderer.RenderArguments(service.StopArguments, values).Text;
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = command,
+            Arguments = arguments,
+            WorkingDirectory = service.WorkingDirectory,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        foreach (var env in environment)
+        {
+            psi.Environment[env.Key] = env.Value;
+        }
+
+        Log("SYS", $"Running stop command: {QuoteForLog(command)} {arguments}".TrimEnd());
+        try
+        {
+            using var stopProcess = new Process { StartInfo = psi };
+            stopProcess.OutputDataReceived += (_, e) => { if (e.Data is not null) Log("OUT", e.Data); };
+            stopProcess.ErrorDataReceived += (_, e) => { if (e.Data is not null) Log("ERR", e.Data); };
+            stopProcess.Start();
+            stopProcess.BeginOutputReadLine();
+            stopProcess.BeginErrorReadLine();
+            if (await WaitForExitAsync(stopProcess, timeout))
+            {
+                Log("SYS", $"Stop command exited with code {TryGetExitCode(stopProcess)?.ToString() ?? "?"}");
+            }
+            else
+            {
+                Log("SYS", $"Stop command did not finish within {timeout.TotalSeconds:0}s; killing it");
+                try { stopProcess.Kill(entireProcessTree: true); } catch { /* exited meanwhile */ }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log("SYS", $"Stop command failed: {ex.Message}");
+        }
     }
 
     public async Task<RestartServiceResult> RestartServiceAsync(int serviceId, CancellationToken cancellationToken)
@@ -414,14 +580,12 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
         // Hold the per-service lock across the whole stop→start sequence so a concurrent
         // start/stop can't interleave between the two halves of the restart.
         var serviceLock = _serviceLocks.GetOrAdd(serviceId, _ => new SemaphoreSlim(1, 1));
-        await serviceLock.WaitAsync(cancellationToken);
+        await serviceLock.WaitAsync(CancellationToken.None);
         try
         {
-            if (_running.ContainsKey(serviceId))
-            {
-                await StopServiceCoreAsync(serviceId, cancellationToken);
-            }
-            var start = await StartServiceCoreAsync(serviceId, cancellationToken);
+            // Also covers an instance left running by an earlier DevDeck session.
+            await StopServiceCoreAsync(serviceId);
+            var start = await StartServiceCoreAsync(serviceId);
             return new RestartServiceResult
             {
                 ServiceId = serviceId,
@@ -437,22 +601,25 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
         }
     }
 
-    private async Task WaitForRunningRemovalAsync(int serviceId, TimeSpan timeout, CancellationToken cancellationToken)
+    private async Task WaitForRunningRemovalAsync(int serviceId, TimeSpan timeout)
     {
         var deadline = DateTimeOffset.UtcNow + timeout;
         while (_running.ContainsKey(serviceId) && DateTimeOffset.UtcNow < deadline)
         {
-            await Task.Delay(50, cancellationToken);
+            await Task.Delay(50);
         }
     }
 
     public async Task<StartProfileResult> StartProfileAsync(int profileId, CancellationToken cancellationToken)
     {
-        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
-        var profile = await db.LaunchProfiles
-            .Include(p => p.Services)
-            .ThenInclude(s => s.DevService)
-            .FirstOrDefaultAsync(p => p.Id == profileId, cancellationToken);
+        LaunchProfile? profile;
+        await using (var db = await _dbFactory.CreateDbContextAsync())
+        {
+            profile = await db.LaunchProfiles
+                .Include(p => p.Services)
+                .ThenInclude(s => s.DevService)
+                .FirstOrDefaultAsync(p => p.Id == profileId);
+        }
 
         if (profile is null)
         {
@@ -461,19 +628,37 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
 
         var outcomes = new List<ServiceActionOutcome>();
         var ordered = profile.Services.OrderBy(s => s.StartOrder).ToList();
-        foreach (var entry in ordered)
+        for (var i = 0; i < ordered.Count; i++)
         {
-            var result = await StartServiceAsync(entry.DevServiceId, cancellationToken);
+            var entry = ordered[i];
+            var service = entry.DevService;
+
+            // "Start each service if not already running": members that need nothing (or that
+            // DevDeck never launches) are reported as skipped, not as failures, and cost no delay.
+            var skipReason = !service.Enabled ? "disabled"
+                : service.UseExternalInstance ? "passthru"
+                : _running.ContainsKey(service.Id) ? "already running"
+                : null;
+            if (skipReason is not null)
+            {
+                outcomes.Add(new ServiceActionOutcome
+                {
+                    ServiceId = service.Id, ServiceName = service.Name, Success = true, Skipped = true, Message = skipReason,
+                });
+                continue;
+            }
+
+            var result = await StartServiceAsync(entry.DevServiceId, CancellationToken.None);
             outcomes.Add(new ServiceActionOutcome
             {
                 ServiceId = entry.DevServiceId,
-                ServiceName = entry.DevService.Name,
+                ServiceName = service.Name,
                 Success = result.Success,
                 Message = result.Message ?? result.Error,
             });
-            if (entry.StartDelaySeconds > 0)
+            if (result.Success && entry.StartDelaySeconds > 0 && i < ordered.Count - 1)
             {
-                await Task.Delay(TimeSpan.FromSeconds(entry.StartDelaySeconds), cancellationToken);
+                await Task.Delay(TimeSpan.FromSeconds(entry.StartDelaySeconds));
             }
         }
         return new StartProfileResult { ProfileId = profileId, Success = outcomes.All(o => o.Success), Outcomes = outcomes };
@@ -482,20 +667,20 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
     public async Task<StartAllResult> StartAllAsync(CancellationToken cancellationToken)
     {
         List<(int Id, string Name)> targets;
-        await using (var db = await _dbFactory.CreateDbContextAsync(cancellationToken))
+        await using (var db = await _dbFactory.CreateDbContextAsync())
         {
             targets = await db.DevServices
                 .Where(s => s.Enabled && !s.UseExternalInstance)
                 .OrderBy(s => s.DisplayOrder).ThenBy(s => s.Name)
                 .Select(s => new ValueTuple<int, string>(s.Id, s.Name))
-                .ToListAsync(cancellationToken);
+                .ToListAsync();
         }
 
         var outcomes = new List<ServiceActionOutcome>();
         foreach (var (id, name) in targets)
         {
             if (_running.ContainsKey(id)) continue; // already running — skip
-            var result = await StartServiceAsync(id, cancellationToken);
+            var result = await StartServiceAsync(id, CancellationToken.None);
             outcomes.Add(new ServiceActionOutcome
             {
                 ServiceId = id,
@@ -509,37 +694,177 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
 
     public async Task<StopAllResult> StopAllAsync(CancellationToken cancellationToken)
     {
+        // Everything tracked; every service with a start or stop in flight (its stop waits for
+        // that to finish, so a start that launches meanwhile is still caught); and every service
+        // with a run still recorded as active: the stop of such a service reaches a process an
+        // earlier session left running, or finalizes the row of one that has died. A stop only
+        // counts when something was actually running.
         var targets = _running.Values.ToDictionary(r => r.DevServiceId, r => r.ServiceName);
-        await using (var db = await _dbFactory.CreateDbContextAsync(cancellationToken))
+        await using (var db = await _dbFactory.CreateDbContextAsync())
         {
-            var orphanedServiceRuns = await db.ServiceRuns
-                .Include(r => r.DevService)
-                .Where(r => ActiveStatuses.Contains(r.Status) && r.ProcessId != null)
-                .OrderByDescending(r => r.StartedUtc)
-                .ToListAsync(cancellationToken);
-
-            foreach (var run in orphanedServiceRuns)
+            var names = await db.DevServices.ToDictionaryAsync(s => s.Id, s => s.Name);
+            foreach (var serviceId in _serviceLocks.Keys.Where(IsServiceBusy))
             {
-                targets.TryAdd(run.DevServiceId, run.DevService?.Name ?? run.DevServiceId.ToString());
+                targets.TryAdd(serviceId, names.GetValueOrDefault(serviceId) ?? serviceId.ToString());
+            }
+
+            var activeRunServiceIds = await db.ServiceRuns
+                .Where(r => ActiveStatuses.Contains(r.Status) && r.ProcessId != null)
+                .Select(r => r.DevServiceId)
+                .Distinct()
+                .ToListAsync();
+            foreach (var serviceId in activeRunServiceIds)
+            {
+                targets.TryAdd(serviceId, names.GetValueOrDefault(serviceId) ?? serviceId.ToString());
             }
         }
 
         // Stop concurrently: each stop can take StopTimeoutSeconds plus the kill fallback,
         // and one at a time that quickly outlasts the host's shutdown window.
-        var outcomes = await Task.WhenAll(
+        var results = await Task.WhenAll(
             targets.OrderBy(t => t.Value, StringComparer.OrdinalIgnoreCase).Select(async t =>
             {
-                var info = _running.TryGetValue(t.Key, out var existing) ? existing : null;
-                var result = await StopServiceAsync(t.Key, cancellationToken);
-                return new ServiceActionOutcome
+                var result = await StopServiceAsync(t.Key, CancellationToken.None);
+                return (result, outcome: new ServiceActionOutcome
                 {
                     ServiceId = t.Key,
-                    ServiceName = info?.ServiceName ?? t.Value,
+                    ServiceName = t.Value,
                     Success = result.Success,
                     Message = result.Message ?? result.Error,
-                };
+                });
             }));
-        return new StopAllResult { Stopped = outcomes.Count(o => o.Success), Outcomes = outcomes.ToList() };
+        var outcomes = results.Where(r => !r.result.NothingToStop).Select(r => r.outcome).ToList();
+        return new StopAllResult { Stopped = outcomes.Count(o => o.Success), Outcomes = outcomes };
+    }
+
+    /// <summary>
+    /// Startup: takes back under management the services an earlier DevDeck session launched
+    /// and left running (by default DevDeck leaves them running when it exits). Without this
+    /// they would show as stopped, the proxy would refuse them, and Start would launch a
+    /// duplicate next to each. Returns how many were re-attached.
+    /// </summary>
+    public async Task<int> AdoptOrphanedRunsAsync(CancellationToken cancellationToken = default)
+    {
+        if (!ExecutionAllowed())
+        {
+            return 0;
+        }
+
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        var services = await db.DevServices.ToListAsync(cancellationToken);
+        var adopted = 0;
+        foreach (var service in services)
+        {
+            if (await TryAdoptLiveRunAsync(db, service) is not null)
+            {
+                adopted++;
+            }
+        }
+        return adopted;
+    }
+
+    // Re-attaches the newest still-running run of the service, if there is one and nothing is
+    // tracked for it yet. Callers outside startup hold the service's lock.
+    private async Task<RunningProcessInfo?> TryAdoptLiveRunAsync(DevDeckDbContext db, DevService service)
+    {
+        if (_running.ContainsKey(service.Id))
+        {
+            return null;
+        }
+
+        var activeRuns = await db.ServiceRuns
+            .Where(r => r.DevServiceId == service.Id && ActiveStatuses.Contains(r.Status) && r.ProcessId != null)
+            .OrderByDescending(r => r.StartedUtc)
+            .ToListAsync();
+
+        foreach (var run in activeRuns)
+        {
+            var process = RunProcessMatcher.TryGetSameRunProcess(
+                run.ProcessId!.Value,
+                run.StartedUtc,
+                run.ProcessStartKey,
+                ex => _logger.LogDebug(ex, "Could not inspect process {ProcessId} of run {RunId}", run.ProcessId, run.Id));
+            if (process is null)
+            {
+                continue;
+            }
+
+            var info = Adopt(service, run, process);
+            if (info is not null)
+            {
+                // A run from before start keys were recorded: record it now, so a later clock
+                // step can't make this process unrecognisable.
+                if (run.ProcessStartKey is null && ProcessTree.TryGetIdentity(run.ProcessId.Value, out var identity))
+                {
+                    run.ProcessStartKey = identity.StartKey;
+                    await SaveQuietlyAsync(db, run.Id);
+                }
+                return info;
+            }
+        }
+
+        return null;
+    }
+
+    private RunningProcessInfo? Adopt(DevService service, ServiceRun run, Process process)
+    {
+        var pid = run.ProcessId!.Value;
+        var logPath = run.LogFilePath ?? DevDeckPaths.LogFilePathFor(service.Name, run.Id, run.StartedUtc);
+        var info = new RunningProcessInfo
+        {
+            DevServiceId = service.Id,
+            ServiceRunId = run.Id,
+            ServiceName = service.Name,
+            Process = process,
+            StartedUtc = run.StartedUtc,
+            LogFilePath = logPath,
+            Port = service.Port,
+            Url = service.Url,
+            Status = ProcessStatus.Running,
+            IsAdopted = true,
+            ProcessGroup = ProcessTree.GetProcessGroup(pid) == pid ? pid : null,
+        };
+
+        if (!_running.TryAdd(service.Id, info))
+        {
+            process.Dispose();
+            return null;
+        }
+
+        var handled = 0;
+        process.Exited += async (_, _) =>
+        {
+            var stopRequested = info.Status == ProcessStatus.Stopping;
+            if (Interlocked.Exchange(ref handled, 1) == 1) return;
+            try
+            {
+                await HandleProcessExitedAsync(service.Id, run.Id, logPath, process, info, stopRequested);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to finalize exited service {ServiceId}", service.Id);
+            }
+        };
+        try
+        {
+            process.EnableRaisingEvents = true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not watch re-attached process {ProcessId}", pid);
+        }
+
+        AppendSystemLine(service.Id, run.Id, logPath,
+            $"Re-attached to PID {pid}, left running by an earlier DevDeck session; its output is no longer captured.");
+        _healthStatusCache.MarkStarting(service.Id, PostStartHealthWarmup);
+        _logger.LogInformation("Re-attached service {ServiceName} (PID {ProcessId}) from an earlier session", service.Name, pid);
+
+        // It may have exited between the liveness check and the watch being set up.
+        if (SafeHasExited(process) && Interlocked.Exchange(ref handled, 1) == 0)
+        {
+            _ = HandleProcessExitedAsync(service.Id, run.Id, logPath, process, info, stopRequested: false);
+        }
+        return info;
     }
 
     private void WriteLine(int serviceId, long runId, string logPath, string stream, string text)
@@ -570,77 +895,105 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
         }
     }
 
-    private async Task<StopServiceResult> StopOrphanedServiceRunAsync(int serviceId, CancellationToken cancellationToken)
+    // Untracked runs still recorded as active: processes an earlier DevDeck session left
+    // running (stopped like a tracked one, tree and all), or rows of ones that have since died
+    // (just finalized).
+    private async Task<StopServiceResult> StopOrphanedServiceRunsAsync(int serviceId, long? excludeRunId)
     {
-        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var db = await _dbFactory.CreateDbContextAsync();
         var activeRuns = await db.ServiceRuns
             .Where(r => r.DevServiceId == serviceId && ActiveStatuses.Contains(r.Status) && r.ProcessId != null)
             .OrderByDescending(r => r.StartedUtc)
-            .ToListAsync(cancellationToken);
+            .ToListAsync();
 
-        foreach (var run in activeRuns)
+        var stoppedPids = new List<int>();
+        var failedPids = new List<int>();
+        long? lastRunId = null;
+        foreach (var run in activeRuns.Where(r => r.Id != excludeRunId))
         {
+            var pid = run.ProcessId!.Value;
             using var process = RunProcessMatcher.TryGetSameRunProcess(
-                run.ProcessId!.Value,
+                pid,
                 run.StartedUtc,
-                ex => _logger.LogDebug(ex, "Could not inspect orphaned process {ProcessId} for service {ServiceId}", run.ProcessId, serviceId));
+                run.ProcessStartKey,
+                ex => _logger.LogDebug(ex, "Could not inspect orphaned process {ProcessId} for service {ServiceId}", pid, serviceId));
 
             if (process is null)
             {
+                // Died while nobody was watching: record that instead of reporting it as running.
+                run.StoppedUtc ??= DateTimeOffset.UtcNow;
+                run.Status = run.Status == ProcessStatusNames.Starting ? ProcessStatusNames.FailedToStart : ProcessStatusNames.Stopped;
                 continue;
             }
 
-            AppendOptionalSystemLine(serviceId, run.Id, run.LogFilePath, $"Stop requested for orphaned process PID {run.ProcessId}");
+            lastRunId = run.Id;
+            AppendOptionalSystemLine(serviceId, run.Id, run.LogFilePath, $"Stop requested for orphaned process PID {pid}");
             run.Status = ProcessStatusNames.Stopping;
             run.StoppedUtc = null;
-            await db.SaveChangesAsync(cancellationToken);
+            await SaveQuietlyAsync(db, run.Id);
 
             var killed = false;
-            var exited = SafeHasExited(process);
+            var outcome = new StopOutcome(false, false, 0);
             try
             {
-                if (!exited)
-                {
-                    killed = true;
-                    AppendOptionalSystemLine(serviceId, run.Id, run.LogFilePath, "Killing orphaned process tree");
-                    process.Kill(entireProcessTree: true);
-                    exited = await WaitForExitAsync(process, TimeSpan.FromSeconds(5), CancellationToken.None);
-                }
+                var group = ProcessTree.GetProcessGroup(pid) == pid ? pid : (int?)null;
+                outcome = await ProcessTerminator.StopTreeAsync(
+                    process,
+                    group,
+                    TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.StopTimeoutSeconds)),
+                    line => AppendOptionalSystemLine(serviceId, run.Id, run.LogFilePath, line),
+                    () => killed = true);
             }
             catch (Exception ex)
             {
                 AppendOptionalSystemLine(serviceId, run.Id, run.LogFilePath, $"Error stopping orphaned process: {ex.Message}");
-                _logger.LogWarning(ex, "Failed to stop orphaned process {ProcessId} for service {ServiceId}", run.ProcessId, serviceId);
+                _logger.LogWarning(ex, "Failed to stop orphaned process {ProcessId} for service {ServiceId}", pid, serviceId);
             }
 
-            if (exited || SafeHasExited(process))
+            if (outcome.Exited || SafeHasExited(process))
             {
-                var exitCode = TryGetExitCode(process);
                 run.StoppedUtc = DateTimeOffset.UtcNow;
-                run.ExitCode = exitCode;
                 run.Status = killed ? ProcessStatusNames.Killed : ProcessStatusNames.Stopped;
-                await db.SaveChangesAsync(cancellationToken);
-                AppendOptionalSystemLine(serviceId, run.Id, run.LogFilePath, $"Orphaned process stopped with code {exitCode?.ToString() ?? "?"}");
-                return new StopServiceResult
-                {
-                    ServiceId = serviceId,
-                    RunId = run.Id,
-                    Success = true,
-                    Message = $"Stopped orphaned PID {run.ProcessId}",
-                };
+                stoppedPids.Add(pid);
+                AppendOptionalSystemLine(serviceId, run.Id, run.LogFilePath, "Orphaned process stopped");
             }
-
-            await db.SaveChangesAsync(cancellationToken);
-            return new StopServiceResult
+            else
             {
-                ServiceId = serviceId,
-                RunId = run.Id,
-                Success = false,
-                Error = "Timed out waiting for orphaned process to exit",
-            };
+                failedPids.Add(pid);
+            }
+            if (!string.IsNullOrWhiteSpace(run.LogFilePath))
+            {
+                _logFileWriter.Close(run.LogFilePath, allowReopen: false);
+            }
         }
 
-        return new StopServiceResult { ServiceId = serviceId, Success = false, Error = "Service is not running." };
+        await SaveQuietlyAsync(db, null);
+
+        if (stoppedPids.Count == 0 && failedPids.Count == 0)
+        {
+            return new StopServiceResult { ServiceId = serviceId, Success = false, NothingToStop = true, Error = "Service is not running." };
+        }
+
+        return new StopServiceResult
+        {
+            ServiceId = serviceId,
+            RunId = lastRunId,
+            Success = failedPids.Count == 0,
+            Message = failedPids.Count == 0 ? $"Stopped orphaned PID {string.Join(", ", stoppedPids)}" : null,
+            Error = failedPids.Count == 0 ? null : $"Timed out waiting for orphaned PID {string.Join(", ", failedPids)} to exit",
+        };
+    }
+
+    private async Task SaveQuietlyAsync(DevDeckDbContext db, long? runId)
+    {
+        try
+        {
+            await db.SaveChangesAsync(CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to update ServiceRun {RunId}", runId);
+        }
     }
 
     private void AppendLaunchDiagnostics(
@@ -662,10 +1015,11 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
         AppendSystemLine(serviceId, runId, logPath, $"Environment overrides: {FormatEnvironmentOverrides(environment)}");
     }
 
-    private async Task HandleProcessExitedAsync(int serviceId, long runId, string logPath, Process process, RunningProcessInfo? info)
+    private async Task HandleProcessExitedAsync(
+        int serviceId, long runId, string logPath, Process process, RunningProcessInfo? info, bool stopRequested)
     {
-        int? exitCode = null;
-        try { exitCode = process.ExitCode; } catch { /* ignore */ }
+        var exitCode = TryGetExitCode(process);
+        var adopted = info?.IsAdopted == true;
 
         // Let the async stdout/stderr readers deliver buffered tail lines before the exit
         // line is written. WaitForExitAsync returns once both streams hit EOF (usually at
@@ -676,7 +1030,18 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
             try { await process.WaitForExitAsync(drain.Token); } catch { /* capped / disposed */ }
         }
 
-        AppendSystemLine(serviceId, runId, logPath, $"Process exited with code {exitCode?.ToString() ?? "?"}");
+        AppendSystemLine(serviceId, runId, logPath, exitCode is null && adopted
+            ? "Process exited (exit code unavailable: it was started by an earlier DevDeck session)"
+            : $"Process exited with code {exitCode?.ToString() ?? "?"}");
+
+        // Decided from the in-memory state the stop path sets, not from the run row's status:
+        // a concurrent Stopping write could land on either side of this handler's update.
+        var status = adopted && exitCode is null && !stopRequested
+            ? ProcessStatusNames.Stopped
+            : ProcessStatusNames.ResolveExitStatus(
+                stopRequested ? ProcessStatusNames.Stopping : ProcessStatusNames.Running,
+                exitCode,
+                info?.KillIssued == true);
 
         // Finalize the run while it is still in the running map: RunHistoryRefreshService
         // leaves tracked runs to this handler (and snapshots the map before reading rows),
@@ -690,7 +1055,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
             {
                 run.StoppedUtc = DateTimeOffset.UtcNow;
                 run.ExitCode = exitCode;
-                run.Status = ProcessStatusNames.ResolveExitStatus(run.Status, exitCode, info?.KillIssued == true);
+                run.Status = status;
                 await db.SaveChangesAsync();
             }
         }
@@ -725,6 +1090,11 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
     {
         try { return p.ExitCode; } catch { return null; }
     }
+
+    private List<RenderedEnvironmentVariable> RenderEnvironment(DevService service, IReadOnlyDictionary<string, string?> values) =>
+        service.EnvironmentVariables
+            .Select(env => new RenderedEnvironmentVariable(env.Key, _renderer.Render(env.Value, values).Text, env.IsSecret))
+            .ToList();
 
     private static string? EffectivePathValue(IReadOnlyCollection<RenderedEnvironmentVariable> environment)
     {
@@ -772,75 +1142,31 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
     private bool ExecutionAllowed() =>
         !_options.CurrentValue.DevelopmentOnly || _environment.IsDevelopment();
 
-    private async Task MarkRunStatusAsync(long runId, string status, CancellationToken cancellationToken)
+    // Conditional on the run not being finished yet, so a Stopping that arrives after the exit
+    // handler's final write can't overwrite it; and not cancellable, so an aborted request
+    // can't skip it halfway through a stop.
+    private async Task MarkRunStoppingAsync(long runId)
     {
         try
         {
-            await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
-            var run = await db.ServiceRuns.FirstOrDefaultAsync(r => r.Id == runId, cancellationToken);
-            if (run is null) return;
-            run.Status = status;
-            await db.SaveChangesAsync(cancellationToken);
+            await using var db = await _dbFactory.CreateDbContextAsync();
+            await db.ServiceRuns
+                .Where(r => r.Id == runId && r.StoppedUtc == null)
+                .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, ProcessStatusNames.Stopping));
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to mark ServiceRun {RunId} as {Status}", runId, status);
+            _logger.LogWarning(ex, "Failed to mark ServiceRun {RunId} as {Status}", runId, ProcessStatusNames.Stopping);
         }
     }
-
-    private bool TrySendGracefulShutdown(Process process, int serviceId, long runId, string logPath)
-    {
-        try
-        {
-            if (process.HasExited) return false;
-
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                // CloseMainWindow only reaches processes that have a main window; console
-                // children (npm/dotnet/func) have none, so it returns false and does nothing.
-                // Report whether we actually signalled: a false return skips the pointless
-                // graceful wait and goes straight to the kill fallback instead of idling for
-                // the full StopTimeoutSeconds on every console-app stop.
-                var closed = process.CloseMainWindow();
-                AppendSystemLine(serviceId, runId, logPath,
-                    closed ? "Sent close to main window" : "No main window; killing process tree");
-                return closed;
-            }
-
-            // Unix: send SIGTERM via libc kill — Process.Kill() is SIGKILL on .NET so we
-            // PInvoke directly to let the child shut down gracefully (npm/dotnet/func all
-            // listen for SIGTERM).
-            var pid = SafePid(process);
-            if (pid is null) return false;
-
-            var rc = PosixKill(pid.Value, SIGTERM);
-            if (rc != 0)
-            {
-                AppendSystemLine(serviceId, runId, logPath, $"kill(SIGTERM) failed with errno {Marshal.GetLastWin32Error()}");
-                return false;
-            }
-            AppendSystemLine(serviceId, runId, logPath, "Sent SIGTERM");
-            return true;
-        }
-        catch (Exception ex)
-        {
-            AppendSystemLine(serviceId, runId, logPath, $"Graceful shutdown signal failed: {ex.Message}");
-            return false;
-        }
-    }
-
-    private const int SIGTERM = 15;
-
-    [DllImport("libc", EntryPoint = "kill", SetLastError = true)]
-    private static extern int PosixKill(int pid, int sig);
 
     private sealed record RenderedEnvironmentVariable(string Key, string Value, bool IsSecret);
 
-    private static async Task<bool> WaitForExitAsync(Process process, TimeSpan timeout, CancellationToken cancellationToken)
+    private static async Task<bool> WaitForExitAsync(Process process, TimeSpan timeout)
     {
         try
         {
-            await process.WaitForExitAsync(cancellationToken).WaitAsync(timeout, cancellationToken);
+            await process.WaitForExitAsync().WaitAsync(timeout);
             return true;
         }
         catch (TimeoutException)
@@ -855,7 +1181,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
 
     // Container disposal at host shutdown: release process handles and locks. This does
     // NOT stop the child processes — that is StopServicesOnShutdownHostedService's job,
-    // and only when DevDeck:StopServicesOnShutdown opts in.
+    // under DevDeck:StopServicesOnShutdown (on by default).
     public void Dispose()
     {
         foreach (var info in _running.Values)

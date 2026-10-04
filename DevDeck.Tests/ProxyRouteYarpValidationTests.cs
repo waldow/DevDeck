@@ -55,16 +55,28 @@ public sealed class ProxyRouteYarpValidationTests
     }
 
     [Fact]
-    public async Task BuildAsync_accepts_the_builtin_authorization_policies()
+    public async Task BuildAsync_accepts_the_anonymous_authorization_policy()
     {
         var result = await _builder.BuildAsync(
         [
-            Route(1, "Default", r => r.AuthorizationPolicy = "Default"),
+            Route(1, "Blank"),
             Route(2, "Anonymous", r => r.AuthorizationPolicy = "Anonymous"),
         ]);
 
         result.Routes.Should().HaveCount(2);
         result.Warnings.Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData("Default")]
+    [InlineData("default")]
+    public async Task Default_authorization_policy_is_refused_because_devdeck_has_no_authentication(string policy)
+    {
+        // "Default" requires an authenticated user; with no authentication scheme registered the
+        // challenge throws, so every request to the route would be a 500.
+        var errors = await _builder.ValidateAsync(Route(0, "Locked", r => r.AuthorizationPolicy = policy));
+
+        errors.Should().ContainSingle().Which.Should().Contain("no authentication");
     }
 
     [Fact]
