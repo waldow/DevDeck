@@ -77,6 +77,9 @@ public sealed class PortProbeServiceTests
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
         listener.Stop();
         var probe = new PortProbeService(new FakeProcessManager());
+        // Untimed first probe: JIT and thread-pool start-up (the whole suite starts at once)
+        // must not count against the probe's own timing.
+        await probe.IsPortOpenAsync(port);
 
         var timer = System.Diagnostics.Stopwatch.StartNew();
         var open = await probe.IsPortOpenAsync(port);
@@ -114,6 +117,8 @@ public sealed class PortProbeServiceTests
         public LiveLogSlice GetLiveLogsSince(int serviceId, long since) => new([], 0, 0, false);
 
         public bool IsServiceBusy(int serviceId) => false;
+
+        public bool IsServiceStarting(int serviceId) => false;
 
         public void ClearLiveLogs(int serviceId)
         {

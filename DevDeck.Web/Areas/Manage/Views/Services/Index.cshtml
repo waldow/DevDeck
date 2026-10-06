@@ -5,6 +5,7 @@
     ViewData["Crumb"] = "Configured services";
     var presets = (ViewBag.Presets as IReadOnlyList<CommandPreset>) ?? new List<CommandPreset>();
     var running = (ViewBag.RunningIds as HashSet<int>) ?? new HashSet<int>();
+    var starting = (ViewBag.StartingIds as HashSet<int>) ?? new HashSet<int>();
     var conflictPorts = (ViewBag.ConflictPorts as HashSet<int>) ?? new HashSet<int>();
     var pollMs = ViewBag.PollMs as int? ?? 1500;
     var healthStatuses = (ViewBag.HealthStatuses as Dictionary<int, string>) ?? new Dictionary<int, string>();
@@ -50,10 +51,11 @@ else
             @foreach (var s in Model)
             {
                 var isRunning = running.Contains(s.Id);
+                var isStarting = starting.Contains(s.Id);
                 var isExternal = s.UseExternalInstance;
                 var hasHealth = s.HealthChecks.Any(h => h.Enabled);
                 var healthText = healthStatuses.TryGetValue(s.Id, out var health) ? health : ((isRunning || isExternal) ? "Unknown" : "NotRunning");
-                var runtimeText = isExternal ? "External" : (isRunning ? "Running" : "Stopped");
+                var runtimeText = isExternal ? "External" : (isRunning ? "Running" : isStarting ? "Starting" : "Stopped");
                 var portConflict = s.Port is int prt && conflictPorts.Contains(prt);
                 <tr class="svc-row" data-service-id="@s.Id" data-enabled="@s.Enabled.ToString().ToLowerInvariant()" data-external="@isExternal.ToString().ToLowerInvariant()">
                     <td>
@@ -84,11 +86,11 @@ else
                     </td>
                     <td>
                         <div class="btn-row">
-                            <div class="row-actions" data-when="running" @(isRunning && !isExternal ? null : "hidden")>
+                            <div class="row-actions" data-when="running" @((isRunning || isStarting) && !isExternal ? null : "hidden")>
                                 <form class="inline" method="post" asp-action="Stop" asp-route-id="@s.Id">@Html.AntiForgeryToken()<button class="btn btn-warn" type="submit">Stop</button></form>
                                 <form class="inline" method="post" asp-action="Restart" asp-route-id="@s.Id">@Html.AntiForgeryToken()<button class="btn" type="submit">Restart</button></form>
                             </div>
-                            <div class="row-actions" data-when="stopped" @(!isRunning && !isExternal ? null : "hidden")>
+                            <div class="row-actions" data-when="stopped" @(!isRunning && !isStarting && !isExternal ? null : "hidden")>
                                 <form class="inline" method="post" asp-action="Start" asp-route-id="@s.Id">@Html.AntiForgeryToken()<button class="btn btn-ok" type="submit">Start</button></form>
                             </div>
                             <div class="row-actions">

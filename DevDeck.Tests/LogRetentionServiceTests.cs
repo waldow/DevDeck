@@ -96,6 +96,25 @@ public sealed class LogRetentionServiceTests : IDisposable
         (await verify.ServiceRuns.FindAsync(finishedRunId))!.LogFilePath.Should().BeNull();
     }
 
+    [Fact]
+    public async Task Sweep_keeps_the_azurite_log()
+    {
+        // Not a run log, so no active run protects it — but a quiet Azurite may still be writing it.
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection("DataSource=:memory:");
+        connection.Open();
+        var factory = new InMemoryFactory(connection);
+        await using (var db = factory.CreateDbContext())
+        {
+            db.Database.EnsureCreated();
+        }
+        var azuriteLog = WriteLog("azurite.log", ageDays: 30);
+
+        var deleted = await LogRetentionService.SweepAsync(factory, _temp.FullName, DateTime.UtcNow.AddDays(-14));
+
+        deleted.Should().Be(0);
+        File.Exists(azuriteLog).Should().BeTrue();
+    }
+
     private sealed class InMemoryFactory(Microsoft.Data.Sqlite.SqliteConnection connection)
         : Microsoft.EntityFrameworkCore.IDbContextFactory<DevDeck.Web.Data.DevDeckDbContext>
     {

@@ -125,7 +125,17 @@ public sealed class RunHistoryRefreshService
                 continue;
             }
 
-            changed += CompleteMissingRun(run, now);
+            // Conditional on the row still being as read: a start that was in flight at the
+            // snapshot may have finished since, its process exited, and its exit handler
+            // written the final status (Crashed, say), which must not be overwritten.
+            var readStatus = run.Status;
+            var finalStatus = CompletedStatus(readStatus);
+            var stoppedUtc = run.StoppedUtc ?? now;
+            changed += await db.ServiceRuns
+                .Where(r => r.Id == run.Id && r.Status == readStatus && r.StoppedUtc == run.StoppedUtc)
+                .ExecuteUpdateAsync(set => set
+                    .SetProperty(r => r.Status, finalStatus)
+                    .SetProperty(r => r.StoppedUtc, stoppedUtc), cancellationToken);
         }
 
         if (changed > 0)
@@ -136,31 +146,8 @@ public sealed class RunHistoryRefreshService
         return changed;
     }
 
-    private static int CompleteMissingRun(Data.Entities.ServiceRun run, DateTimeOffset stoppedUtc)
-    {
-        var newStatus = run.Status switch
-        {
-            ProcessStatusNames.Starting => ProcessStatusNames.FailedToStart,
-            _ => ProcessStatusNames.Stopped,
-        };
-
-        return ApplyCompletion(run, stoppedUtc, newStatus, run.ExitCode);
-    }
-
-    private static int ApplyCompletion(Data.Entities.ServiceRun run, DateTimeOffset stoppedUtc, string status, int? exitCode)
-    {
-        if (run.StoppedUtc is not null &&
-            string.Equals(run.Status, status, StringComparison.Ordinal) &&
-            run.ExitCode == exitCode)
-        {
-            return 0;
-        }
-
-        run.StoppedUtc ??= stoppedUtc;
-        run.Status = status;
-        run.ExitCode = exitCode;
-        return 1;
-    }
+    private static string CompletedStatus(string activeStatus) =>
+        activeStatus == ProcessStatusNames.Starting ? ProcessStatusNames.FailedToStart : ProcessStatusNames.Stopped;
 
     // False for an exited, disposed, or not-yet-started process (HasExited throws for the last).
     private static bool IsAlive(Process process)

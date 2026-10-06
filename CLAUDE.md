@@ -17,7 +17,7 @@ logs, watch health, and route `http://localhost:5050/app`, `/api`, … to the ri
 
 - `DevDeck.slnx` — solution. Two projects, both `net10.0`:
   - `DevDeck.Web` — the application (only deps: `Microsoft.EntityFrameworkCore.Sqlite`, `Yarp.ReverseProxy`).
-  - `DevDeck.Tests` — xUnit + FluentAssertions unit tests (currently **342**, all green). Some exercise real
+  - `DevDeck.Tests` — xUnit + FluentAssertions unit tests (currently **361**, all green). Some exercise real
     processes (POSIX process groups/signals; one Windows-only Ctrl+C test) — run the suite on both OSes when
     touching `Services/Runtime`.
 - `DevDeck_Specification_v2_Reverse_Proxy.md` — the original design spec. **Historical**: v1 is fully built,
@@ -56,7 +56,8 @@ Key singletons registered in `Program.cs`:
   mode at the top of `Program.cs`) — and after `StopTimeoutSeconds` force-kills whatever is left, including
   descendants that outlived the root. Shared build servers in the tree (VBCSCompiler, MSBuild `nodeReuse` workers,
   the Razor server — `ProcessTree.IsSharedBuildServer`, by command line) are left alone: `dotnet run` leaves them
-  behind on purpose and every build of the user's uses them. setsid is only used for a file the kernel can exec
+  behind on purpose and every build of the user's uses them — the force-kill too kills process by process, never
+  `Kill(entireProcessTree)`, which would walk into them. setsid is only used for a file the kernel can exec
   directly (ELF, or a `#!` interpreter that exists), so a command that can't run still fails as FailedToStart.
   The final run status is decided in the exit handler from in-memory
   state captured at the moment of exit (a Stop that lands after a crash doesn't relabel it).
@@ -77,15 +78,19 @@ Key singletons registered in `Program.cs`:
   ones with a warning — YARP rejects a whole snapshot (and throws at startup) if any single route is invalid.
   Routing builds **one** matcher over every endpoint (MVC's `/Manage` included), so the builder also refuses
   what only that build would catch — Match hosts `HostMatcherPolicy` can't parse (checked with the real policy)
-  and constraints `ParameterPolicyFactory` can't resolve — plus the `Default` authorization policy (DevDeck has
+  and constraints `ParameterPolicyFactory` can't resolve or that fail on first use (a `regex(...)` pattern only
+  compiles when the matcher tests it against a literal) — plus the `Default` authorization policy (DevDeck has
   no authentication scheme: every request would 500), destinations on the gateway itself (a loop), timeouts
-  below 1s, and a route ambiguous with an earlier one (`ProxyRouteConflicts`: same template ignoring parameter
-  names, same Order, overlapping hosts → `AmbiguousMatchException`). The editor and importer run the same
+  below 1s, and a route ambiguous with an earlier one (`ProxyRouteConflicts`: templates route precedence can't
+  tell apart — parameter names, `?`, defaults and *which* constraint don't count — same Order, overlapping hosts →
+  `AmbiguousMatchException`). The editor and importer run the same
   checks and refuse such routes up front. `ReloadAsync` is serialized.
 - `HealthCheckBackgroundService` (hosted) + `HealthStatusCache` — poll enabled `ServiceHealthCheck` URLs. The
   cache is the single source of health: the `RequireHealthyDestination` gate *and* every UI pill read its
   aggregate (any Unhealthy wins; `Warming` during the 15s post-start window). A service with no enabled check
-  passes the gate. Due-ness comes from the in-memory results, so a restarted service is re-checked on the next pass.
+  passes the gate. Due-ness comes from the in-memory results, so a restarted service is re-checked on the next pass,
+  as is a failure recorded during the warm-up; results of a check in flight when its service stopped (or its
+  check/port was edited — `ForgetResults`) are dropped. A passthru instance gets one warm-up per up-period.
 - `PortProbeService` — TCP-probes `127.0.0.1:{port}` and `[::1]:{port}` concurrently (a dev server bound to
   `localhost` may listen on IPv6 only) to detect conflicts and passthru/readiness state.
 - `AzuriteSupervisor` (`IAzuriteSupervisor`) — see below.
@@ -253,7 +258,7 @@ on Linux/WSL, `%LOCALAPPDATA%\DevDeck\` on Windows. Holds `devdeck.db` and `logs
 
 ```
 dotnet build                                                          # build the solution (DevDeck.slnx)
-dotnet test                                                           # run all unit tests (342)
+dotnet test                                                           # run all unit tests (361)
 dotnet run --project DevDeck.Web                                      # launch on http://localhost:5050
 dotnet ef migrations add <Name> --project DevDeck.Web -o Migrations   # new EF migration
 ```

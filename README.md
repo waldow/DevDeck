@@ -82,7 +82,7 @@ DevDeck collapses that into one UI. Logs stream into a single panel. Health pill
 - Start, stop, restart, and watch any local command (`npm run dev`, `func start`, `dotnet run`, `docker compose up`, custom binaries).
 - **Start all / Stop all** from the dashboard — a staggered ignite / power-down cascade animates cards as they come up and go down.
 - Per-service environment variables, with **secret masking** in the UI.
-- **Whole-tree stop** — `npm` and everything under it go down together: a graceful signal first (SIGTERM to the service's own process group on Linux/macOS, Ctrl+C on Windows), an optional **stop command** (e.g. `docker compose stop`), then a force-kill of anything still running after `StopTimeoutSeconds`.
+- **Whole-tree stop** — `npm` and everything under it go down together: the optional **stop command** first (e.g. `docker compose stop`), then a graceful signal (SIGTERM to the service's own process group on Linux, to the process and each of its descendants on macOS, Ctrl+C on Windows), then a force-kill of anything still running after `StopTimeoutSeconds`.
 - Services are stopped when DevDeck shuts down; any it leaves behind (it was killed, or you turned `StopServicesOnShutdown` off) are **re-attached** on its next start — shown as running, proxied to, stoppable, never launched twice.
 - Run history per service: start/stop timestamps, exit codes, downloadable logs.
 

@@ -61,7 +61,10 @@ public sealed class StatusController : Controller
             }
             else
             {
-                runtimeStatus = info?.Status.ToString() ?? "Stopped";
+                // A start isn't tracked as running until its process launches (an Azure
+                // Functions start first waits for Azurite), so report it as Starting meanwhile.
+                runtimeStatus = info?.Status.ToString() ??
+                                (_manager.IsServiceStarting(s.Id) ? "Starting" : "Stopped");
                 healthStatus = _healthStatusCache.GetDisplayStatus(s.Id, info is not null);
             }
 

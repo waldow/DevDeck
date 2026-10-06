@@ -358,7 +358,16 @@ public sealed class ProxyRouteBuilder
             {
                 try
                 {
-                    _parameterPolicyFactory.Create(parameter, reference);
+                    var policy = _parameterPolicyFactory.Create(parameter, reference);
+
+                    // Some constraints only fail on first use: regex(...) compiles its pattern
+                    // lazily, and the matcher build uses it against every literal segment of
+                    // the other endpoints ("Manage" among them) — a bad pattern would break
+                    // routing for every endpoint. Use it the same way here.
+                    if (policy is IParameterLiteralNodeMatchingPolicy literalPolicy)
+                    {
+                        literalPolicy.MatchesLiteral(parameter.Name, "Manage");
+                    }
                 }
                 catch (Exception ex)
                 {

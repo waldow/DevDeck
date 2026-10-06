@@ -172,6 +172,26 @@ public sealed class PortabilityImportValidationTests : IDisposable
     }
 
     [Fact]
+    public async Task A_health_check_url_differing_only_in_case_takes_the_files_casing()
+    {
+        await using (var db = _factory.CreateDbContext())
+        {
+            var service = new DevService { Name = "api", ServiceType = "NodeApi", WorkingDirectory = "/tmp", StartCommand = "npm" };
+            service.HealthChecks.Add(new ServiceHealthCheck { Url = "http://localhost:3001/Health" });
+            db.DevServices.Add(service);
+            await db.SaveChangesAsync();
+        }
+
+        var incoming = new PortableService { Name = "api", ServiceType = "NodeApi", WorkingDirectory = "/tmp", StartCommand = "npm" };
+        incoming.HealthChecks.Add(new PortableHealthCheck { Url = "http://localhost:3001/health" });
+        var result = await new PortabilityImporter(_factory).ImportServicesAsync(ServicesJson(incoming));
+
+        result.Errors.Should().BeEmpty();
+        await using var verify = _factory.CreateDbContext();
+        (await verify.ServiceHealthChecks.Select(h => h.Url).SingleAsync()).Should().Be("http://localhost:3001/health");
+    }
+
+    [Fact]
     public async Task Env_var_repeated_in_the_file_is_stored_once()
     {
         var incoming = new PortableService { Name = "api", ServiceType = "NodeApi", WorkingDirectory = "/tmp", StartCommand = "npm" };

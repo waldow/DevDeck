@@ -48,7 +48,9 @@ public sealed class ProxyRequestLogger
 
         var ip = context.Connection.RemoteIpAddress?.ToString() ?? "-";
         var verb = context.Request.Method;
-        var path = context.Request.Path.ToString();
+        // Escaped as on the wire: Request.Path is decoded, so a "%0A" in it would otherwise
+        // forge an extra line in the service's log.
+        var path = context.Request.Path.ToUriComponent();
         var pathAndQuery = path + context.Request.QueryString;
 
         _processManager.AppendProxyLog(logTarget, FormatInbound(ip, verb, pathAndQuery));

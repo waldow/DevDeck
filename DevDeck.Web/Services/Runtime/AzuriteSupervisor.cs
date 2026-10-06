@@ -33,7 +33,7 @@ public sealed class AzuriteSupervisor : IAzuriteSupervisor, IAsyncDisposable
     private Process? _process;
 
     private static readonly string Workspace = Path.Combine(DevDeckPaths.RootFolder, "azurite");
-    private static readonly string LogFile = Path.Combine(DevDeckPaths.LogsFolder, "azurite.log");
+    internal static readonly string LogFile = Path.Combine(DevDeckPaths.LogsFolder, "azurite.log");
 
     public AzuriteSupervisor(
         CommandExecutableResolver resolver,

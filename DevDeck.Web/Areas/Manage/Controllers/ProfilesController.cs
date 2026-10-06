@@ -196,15 +196,25 @@ public sealed class ProfilesController : Controller
     public async Task<IActionResult> Stop(int id, CancellationToken cancellationToken)
     {
         await using var db = await _dbFactory.CreateDbContextAsync();
-        var serviceIds = await db.LaunchProfileServices
+        var members = await db.LaunchProfileServices
             .Where(s => s.LaunchProfileId == id)
-            .Select(s => s.DevServiceId)
+            .Select(s => new { s.DevServiceId, s.DevService.Name })
             .ToListAsync(cancellationToken);
-        foreach (var sid in serviceIds)
+
+        // Concurrently, like Stop all: each stop can take StopTimeoutSeconds plus the kill fallback.
+        var results = await Task.WhenAll(members.Select(async m =>
+            (m.Name, result: await _manager.StopServiceAsync(m.DevServiceId, CancellationToken.None))));
+        var stopped = results.Count(r => r.result.Success && !r.result.NothingToStop);
+        var failed = results.Where(r => !r.result.Success && !r.result.NothingToStop).ToList();
+        if (failed.Count == 0)
         {
-            await _manager.StopServiceAsync(sid, cancellationToken);
+            TempData["Info"] = $"Stopped {stopped} services.";
         }
-        TempData["Info"] = $"Stopped {serviceIds.Count} services.";
+        else
+        {
+            TempData["Error"] = $"Stopped {stopped} services. Failed: " +
+                                string.Join("; ", failed.Select(r => $"{r.Name}: {r.result.Error ?? r.result.Message}")) + ".";
+        }
         return RedirectToAction("Index", "Dashboard");
     }
 

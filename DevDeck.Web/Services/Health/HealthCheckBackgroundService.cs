@@ -8,6 +8,9 @@ namespace DevDeck.Web.Services.Health;
 
 public sealed class HealthCheckBackgroundService : BackgroundService
 {
+    /// <summary>The named HttpClient (registered in Program.cs) that does not follow redirects.</summary>
+    public const string NoRedirectClient = "DevDeck.HealthCheck.NoRedirect";
+
     private readonly IDbContextFactory<DevDeckDbContext> _dbFactory;
     private readonly IDevDeckProcessManager _processManager;
     private readonly PortProbeService _portProbe;
@@ -68,16 +71,21 @@ public sealed class HealthCheckBackgroundService : BackgroundService
 
         var client = _httpClientFactory.CreateClient("DevDeck.HealthCheck");
         client.Timeout = TimeSpan.FromSeconds(3);
+        var noRedirectClient = _httpClientFactory.CreateClient(NoRedirectClient);
+        noRedirectClient.Timeout = TimeSpan.FromSeconds(3);
         var now = DateTimeOffset.UtcNow;
 
         // Checks run concurrently and each one is isolated: a slow or throwing check must
         // neither push the pass past the polling interval nor lose the other checks'
         // results. Each task mutates only its own tracked entity, so the single
         // SaveChangesAsync below is safe.
-        await Task.WhenAll(checks.Where(c => IsDue(c, now)).Select(c => RunCheckAsync(c, client, now, token)));
+        await Task.WhenAll(checks.Where(c => IsDue(c, now)).Select(c => RunCheckAsync(c, ExpectsRedirect(c) ? noRedirectClient : client, now, token)));
 
         await db.SaveChangesAsync(token);
     }
+
+    // A check expecting a 3xx must see the service's own response, not where it redirects to.
+    internal static bool ExpectsRedirect(ServiceHealthCheck check) => check.ExpectedStatusCode is >= 300 and < 400;
 
     // Judged from the in-memory results, not the persisted LastCheckedUtc: when a service stops,
     // its cached results are dropped, so after a restart (or a DevDeck restart) its checks run
@@ -85,10 +93,14 @@ public sealed class HealthCheckBackgroundService : BackgroundService
     // which the RequireHealthyDestination gate would read as Unknown.
     private bool IsDue(ServiceHealthCheck check, DateTimeOffset now) => IsDue(_healthStatusCache, check, now);
 
+    // NotRunning, and any failure recorded during the post-start warm-up, is re-checked on every
+    // pass: the service coming up must not wait out a whole interval to read as Healthy.
     internal static bool IsDue(HealthStatusCache cache, ServiceHealthCheck check, DateTimeOffset now) =>
         !cache.TryGetResult(check.DevServiceId, check.Id, out var last) ||
         now - last.CheckedUtc >= TimeSpan.FromSeconds(Math.Max(1, check.IntervalSeconds)) ||
-        string.Equals(last.Status, HealthStatusNames.NotRunning, StringComparison.OrdinalIgnoreCase);
+        string.Equals(last.Status, HealthStatusNames.NotRunning, StringComparison.OrdinalIgnoreCase) ||
+        (!string.Equals(last.Status, HealthStatusNames.Healthy, StringComparison.OrdinalIgnoreCase) &&
+         cache.RecordedDuringWarmup(check.DevServiceId, last.CheckedUtc));
 
     private async Task RunCheckAsync(ServiceHealthCheck check, HttpClient client, DateTimeOffset now, CancellationToken token)
     {

@@ -30,6 +30,7 @@ public sealed class ManageEditorValidationTests : IDisposable
     private readonly SqliteConnection _connection;
     private readonly TestDbContextFactory _factory;
     private readonly FakeProcessManager _manager = new();
+    private readonly HealthStatusCache _healthCache = new();
     private DevDeckProxyConfigProvider? _proxyProvider;
 
     public ManageEditorValidationTests()
@@ -221,6 +222,123 @@ public sealed class ManageEditorValidationTests : IDisposable
     }
 
     [Fact]
+    public async Task Service_edit_removes_a_saved_environment_variable_whose_key_was_cleared()
+    {
+        // Blank rows are skipped on save; a saved one used to be kept unchanged — and re-adding
+        // its key in a new row then failed the save on the unique (service, key) index.
+        var serviceId = await SeedServiceAsync();
+        int fooId;
+        await using (var db = _factory.CreateDbContext())
+        {
+            var service = await db.DevServices.Include(s => s.EnvironmentVariables).SingleAsync();
+            service.EnvironmentVariables.Add(new ServiceEnvironmentVariable { Key = "FOO", Value = "old" });
+            await db.SaveChangesAsync();
+            fooId = service.EnvironmentVariables.Single().Id;
+        }
+        var model = ServiceModel();
+        model.EnvironmentVariables.Add(new EnvVarEditRow { Id = fooId, Key = "", Value = "old" });
+        model.EnvironmentVariables.Add(new EnvVarEditRow { Key = "FOO", Value = "bar" });
+
+        var result = await ServicesController().Edit(serviceId, model);
+
+        result.Should().BeOfType<RedirectToActionResult>();
+        await using var verify = _factory.CreateDbContext();
+        var env = await verify.ServiceEnvironmentVariables.ToDictionaryAsync(e => e.Key, e => e.Value);
+        env.Should().BeEquivalentTo(new Dictionary<string, string> { ["FOO"] = "bar" });
+    }
+
+    [Fact]
+    public async Task Service_edit_removes_a_saved_health_check_whose_url_was_cleared()
+    {
+        var serviceId = await SeedServiceAsync();
+        var checkId = await SeedHealthCheckAsync(serviceId, "http://localhost:{port}/health");
+        var model = ServiceModel();
+        model.HealthChecks.Add(new HealthCheckEditRow { Id = checkId, Url = "" });
+
+        var result = await ServicesController().Edit(serviceId, model);
+
+        result.Should().BeOfType<RedirectToActionResult>();
+        await using var verify = _factory.CreateDbContext();
+        (await verify.ServiceHealthChecks.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Service_edit_forgets_the_cached_results_of_a_check_whose_url_changed()
+    {
+        var serviceId = await SeedServiceAsync();
+        var checkId = await SeedHealthCheckAsync(serviceId, "http://localhost:{port}/helth");
+        _healthCache.Set(serviceId, checkId, HealthStatusNames.Unhealthy, DateTimeOffset.UtcNow.AddSeconds(-1));
+        var model = ServiceModel();
+        model.HealthChecks.Add(new HealthCheckEditRow { Id = checkId, Url = "http://localhost:{port}/health" });
+
+        await ServicesController().Edit(serviceId, model);
+
+        _healthCache.TryGetResult(serviceId, checkId, out _).Should().BeFalse("a stale Unhealthy would keep the gate shut for a whole interval");
+    }
+
+    [Fact]
+    public async Task Service_edit_keeps_cached_results_when_no_check_target_changed()
+    {
+        var serviceId = await SeedServiceAsync();
+        var checkId = await SeedHealthCheckAsync(serviceId, "http://localhost:{port}/health");
+        _healthCache.Set(serviceId, checkId, HealthStatusNames.Healthy, DateTimeOffset.UtcNow.AddSeconds(-1));
+        var model = ServiceModel();
+        model.DisplayOrder = 3;
+        model.HealthChecks.Add(new HealthCheckEditRow { Id = checkId, Url = "http://localhost:{port}/health" });
+
+        await ServicesController().Edit(serviceId, model);
+
+        _healthCache.TryGetResult(serviceId, checkId, out var result).Should().BeTrue();
+        result.Status.Should().Be(HealthStatusNames.Healthy);
+    }
+
+    [Theory]
+    [InlineData("/Manage/Services", true)]
+    [InlineData("/Manage/Services?x=1", true)]
+    [InlineData("//evil.example/x", false)]
+    [InlineData("/\\evil.example/x", false)]
+    [InlineData("evil", false)]
+    public void Only_a_same_site_referer_path_is_redirected_back_to(string path, bool local)
+    {
+        DevDeck.Web.Areas.Manage.Controllers.ServicesController.IsLocalPath(path).Should().Be(local);
+    }
+
+    [Fact]
+    public async Task Status_snapshot_reports_a_start_in_progress_as_starting()
+    {
+        // Not yet tracked as running (an Azure Functions start waiting for Azurite): it used to
+        // read Stopped, and the page offered Start again.
+        var serviceId = await SeedServiceAsync();
+        _manager.Starting.Add(serviceId);
+        var controller = new StatusController(_factory, _manager, new PortProbeService(_manager), _healthCache);
+
+        var result = await controller.Snapshot(CancellationToken.None);
+
+        var json = System.Text.Json.JsonSerializer.Serialize(result.Should().BeOfType<JsonResult>().Which.Value);
+        json.Should().Contain("\"runtimeStatus\":\"Starting\"");
+    }
+
+    [Fact]
+    public async Task Profile_stop_reports_the_members_that_failed_to_stop()
+    {
+        var serviceId = await SeedServiceAsync();
+        int profileId;
+        await using (var db = _factory.CreateDbContext())
+        {
+            var profile = new LaunchProfile { Name = "stack" };
+            profile.Services.Add(new LaunchProfileService { DevServiceId = serviceId });
+            db.LaunchProfiles.Add(profile);
+            await db.SaveChangesAsync();
+            profileId = profile.Id;
+        }
+        var controller = ProfilesController();
+
+        await controller.Stop(profileId, CancellationToken.None);
+
+        controller.TempData["Error"].Should().BeOfType<string>().Which.Should().Contain("api");
+    }
+
+    [Fact]
     public async Task Service_delete_rebuilds_the_proxy_snapshot()
     {
         var serviceId = await SeedServiceAsync(url: "http://localhost:{port}");
@@ -381,7 +499,7 @@ public sealed class ManageEditorValidationTests : IDisposable
             new PortabilityImporter(_factory, _manager),
             _proxyProvider,
             options,
-            new HealthStatusCache()));
+            _healthCache));
     }
 
     private ProxyRoutesController RoutesController()
@@ -442,6 +560,15 @@ public sealed class ManageEditorValidationTests : IDisposable
         db.DevServices.Add(service);
         await db.SaveChangesAsync();
         return service.Id;
+    }
+
+    private async Task<int> SeedHealthCheckAsync(int serviceId, string url)
+    {
+        await using var db = _factory.CreateDbContext();
+        var check = new ServiceHealthCheck { DevServiceId = serviceId, Url = url };
+        db.ServiceHealthChecks.Add(check);
+        await db.SaveChangesAsync();
+        return check.Id;
     }
 
     private static ServiceEditViewModel ServiceModel() => new()
@@ -506,6 +633,10 @@ public sealed class ManageEditorValidationTests : IDisposable
         public HashSet<int> Busy { get; } = new();
 
         public bool IsServiceBusy(int serviceId) => Busy.Contains(serviceId);
+
+        public HashSet<int> Starting { get; } = new();
+
+        public bool IsServiceStarting(int serviceId) => Starting.Contains(serviceId);
 
         public void ClearLiveLogs(int serviceId)
         {

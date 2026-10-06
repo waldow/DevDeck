@@ -25,7 +25,14 @@
                 @(string.IsNullOrEmpty(Model.Url) ? "—" : Model.Url)
                 @if (ViewBag.ResolvedUrl is string resolvedUrl && resolvedUrl != Model.Url)
                 {
-                    <text><span class="dim">→</span> <a href="@resolvedUrl" target="_blank" rel="noopener">@resolvedUrl</a></text>
+                    @if (ViewBag.UrlIsLink is true)
+                    {
+                        <text><span class="dim">→</span> <a href="@resolvedUrl" target="_blank" rel="noopener">@resolvedUrl</a></text>
+                    }
+                    else
+                    {
+                        <text><span class="dim">→</span> <span class="mono">@resolvedUrl</span></text>
+                    }
                 }
             </dd>
             <dt>Port</dt><dd>@(Model.Port?.ToString() ?? "—")</dd>

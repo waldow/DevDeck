@@ -12,14 +12,27 @@ public sealed class HealthStatusCache
     private readonly ConcurrentDictionary<int, ConcurrentDictionary<int, CheckResult>> _byService = new();
     private readonly ConcurrentDictionary<int, DateTimeOffset> _warmupUntil = new();
 
+    // When each service's results were last dropped: a check that was already in flight then
+    // (against the old URL, or the process that just stopped) must not record its result.
+    private readonly ConcurrentDictionary<int, DateTimeOffset> _resetUtc = new();
+
+    // Passthru services granted their one warm-up since their instance was last seen down.
+    private readonly ConcurrentDictionary<int, byte> _externalWarmupGranted = new();
+
     // Services with at least one enabled check, as of the poller's last pass; null until the
     // first pass, when it isn't known yet.
     private volatile IReadOnlySet<int>? _monitoredServices;
 
     public void Set(int serviceId, int checkId, string status, DateTimeOffset? checkedUtc = null)
     {
+        var at = checkedUtc ?? DateTimeOffset.UtcNow;
+        if (_resetUtc.TryGetValue(serviceId, out var reset) && at < reset)
+        {
+            return;
+        }
+
         var checks = _byService.GetOrAdd(serviceId, _ => new ConcurrentDictionary<int, CheckResult>());
-        checks[checkId] = new CheckResult(status, checkedUtc ?? DateTimeOffset.UtcNow);
+        checks[checkId] = new CheckResult(status, at);
     }
 
     /// <summary>The last recorded result of one check, if it has run since the service last stopped.</summary>
@@ -40,6 +53,41 @@ public sealed class HealthStatusCache
     public void MarkStarting(int serviceId, TimeSpan warmupWindow)
     {
         _warmupUntil[serviceId] = DateTimeOffset.UtcNow + warmupWindow;
+    }
+
+    /// <summary>
+    /// A passthru instance is up but not yet known healthy: grants it a warm-up — once, until
+    /// <see cref="ExternalInstanceDown"/>. Re-granting on every request would keep the gate open
+    /// for good when a check stays NotRunning (one that probes another host or port).
+    /// </summary>
+    public void MarkExternalStarting(int serviceId, TimeSpan warmupWindow)
+    {
+        if (_externalWarmupGranted.TryAdd(serviceId, 0))
+        {
+            MarkStarting(serviceId, warmupWindow);
+        }
+    }
+
+    /// <summary>The passthru instance was seen down: its next start may warm up again.</summary>
+    public void ExternalInstanceDown(int serviceId) => _externalWarmupGranted.TryRemove(serviceId, out _);
+
+    /// <summary>
+    /// True when a result was recorded during the service's latest warm-up window. A failure
+    /// then (connection refused while the service was still coming up) says nothing about it
+    /// once up, so the poller re-runs such a check on its next pass instead of a full interval later.
+    /// </summary>
+    public bool RecordedDuringWarmup(int serviceId, DateTimeOffset checkedUtc) =>
+        _warmupUntil.TryGetValue(serviceId, out var until) && checkedUtc < until;
+
+    /// <summary>
+    /// Drops a service's check results (keeping its warm-up), e.g. after its checks or port were
+    /// edited, so the checks run again on the next pass rather than a stale result standing for
+    /// a whole interval.
+    /// </summary>
+    public void ForgetResults(int serviceId)
+    {
+        _resetUtc[serviceId] = DateTimeOffset.UtcNow;
+        _byService.TryRemove(serviceId, out _);
     }
 
     /// <summary>
@@ -77,8 +125,10 @@ public sealed class HealthStatusCache
 
     public void RemoveService(int serviceId)
     {
+        _resetUtc[serviceId] = DateTimeOffset.UtcNow;
         _byService.TryRemove(serviceId, out _);
         _warmupUntil.TryRemove(serviceId, out _);
+        _externalWarmupGranted.TryRemove(serviceId, out _);
     }
 
     public string Get(int serviceId)
