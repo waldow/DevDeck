@@ -15,6 +15,7 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
 {
     private readonly ConcurrentDictionary<int, RunningProcessInfo> _running = new();
     private readonly ConcurrentDictionary<int, SemaphoreSlim> _serviceLocks = new();
+    private readonly ConcurrentDictionary<int, byte> _starting = new();
     private volatile bool _shuttingDown;
     private readonly IDbContextFactory<DevDeckDbContext> _dbFactory;
     private readonly ProcessLogBuffer _logBuffer;
@@ -33,7 +34,6 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
     private const string AzureWebJobsStorageDevelopmentValue = "UseDevelopmentStorage=true";
 
     private static readonly TimeSpan PostStartHealthWarmup = TimeSpan.FromSeconds(15);
-    private static readonly TimeSpan MinimumStopGrace = TimeSpan.FromSeconds(2);
     private static readonly string[] ActiveStatuses =
     [
         ProcessStatusNames.Starting,
@@ -88,6 +88,10 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
     public bool IsServiceBusy(int serviceId) =>
         _serviceLocks.TryGetValue(serviceId, out var serviceLock) && serviceLock.CurrentCount == 0;
 
+    // True from the moment a start begins until its process is tracked in _running (or the
+    // start fails) — a window that includes an Azure Functions start's wait for Azurite.
+    public bool IsServiceStarting(int serviceId) => _starting.ContainsKey(serviceId);
+
     public void ClearLiveLogs(int serviceId) => _logBuffer.Clear(serviceId);
 
     /// <summary>
@@ -124,6 +128,19 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
 
     // Callers must hold the per-service lock.
     private async Task<StartServiceResult> StartServiceCoreAsync(int serviceId)
+    {
+        _starting[serviceId] = 0;
+        try
+        {
+            return await LaunchServiceAsync(serviceId);
+        }
+        finally
+        {
+            _starting.TryRemove(serviceId, out _);
+        }
+    }
+
+    private async Task<StartServiceResult> LaunchServiceAsync(int serviceId)
     {
         if (_shuttingDown)
         {
@@ -462,17 +479,26 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
         AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, "Stop requested");
         await MarkRunStoppingAsync(info.ServiceRunId);
 
+        // StopTimeoutSeconds twice over: once for the stop command, then again as the grace
+        // period after the signal — a `docker compose stop` that needs its whole budget must
+        // not leave the `compose up` client no time to exit.
         var timeout = TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.StopTimeoutSeconds));
-        var deadline = DateTimeOffset.UtcNow + timeout;
         var outcome = new StopOutcome(false, false, 0);
         try
         {
             await RunStopCommandAsync(info, timeout);
-            var grace = deadline - DateTimeOffset.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            // Whatever went wrong (reading the service, say), the process must still be signalled.
+            AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, $"Stop command failed: {ex.Message}");
+        }
+        try
+        {
             outcome = await ProcessTerminator.StopTreeAsync(
                 info.Process,
                 info.ProcessGroup,
-                grace > MinimumStopGrace ? grace : MinimumStopGrace,
+                timeout,
                 line => AppendSystemLine(serviceId, info.ServiceRunId, info.LogFilePath, line),
                 () => info.KillIssued = true);
         }
@@ -792,11 +818,24 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
             var info = Adopt(service, run, process);
             if (info is not null)
             {
+                // It is running again under DevDeck: a row left Stopping (DevDeck died mid-stop
+                // and the process survived) would otherwise read Stopping until it exits.
+                var changed = false;
+                if (run.Status != ProcessStatusNames.Running)
+                {
+                    run.Status = ProcessStatusNames.Running;
+                    run.StoppedUtc = null;
+                    changed = true;
+                }
                 // A run from before start keys were recorded: record it now, so a later clock
                 // step can't make this process unrecognisable.
                 if (run.ProcessStartKey is null && ProcessTree.TryGetIdentity(run.ProcessId.Value, out var identity))
                 {
                     run.ProcessStartKey = identity.StartKey;
+                    changed = true;
+                }
+                if (changed)
+                {
                     await SaveQuietlyAsync(db, run.Id);
                 }
                 return info;
@@ -956,14 +995,15 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
                 run.Status = killed ? ProcessStatusNames.Killed : ProcessStatusNames.Stopped;
                 stoppedPids.Add(pid);
                 AppendOptionalSystemLine(serviceId, run.Id, run.LogFilePath, "Orphaned process stopped");
+                if (!string.IsNullOrWhiteSpace(run.LogFilePath))
+                {
+                    _logFileWriter.Close(run.LogFilePath, allowReopen: false);
+                }
             }
             else
             {
+                // Still running, so it may be re-attached later: its log must stay writable.
                 failedPids.Add(pid);
-            }
-            if (!string.IsNullOrWhiteSpace(run.LogFilePath))
-            {
-                _logFileWriter.Close(run.LogFilePath, allowReopen: false);
             }
         }
 
@@ -1033,6 +1073,21 @@ public sealed class DevDeckProcessManager : IDevDeckProcessManager, IDisposable
         AppendSystemLine(serviceId, runId, logPath, exitCode is null && adopted
             ? "Process exited (exit code unavailable: it was started by an earlier DevDeck session)"
             : $"Process exited with code {exitCode?.ToString() ?? "?"}");
+
+        // The root exited by itself but processes it started live on in its group (a dev server
+        // under a crashed npm, or a launcher that backgrounds its server on purpose). They are
+        // not killed — that may be the point — but once this run ends DevDeck no longer tracks
+        // them, so say so rather than leave a held port unexplained.
+        if (!stopRequested && info?.ProcessGroup is int pgid)
+        {
+            var leftovers = ProcessTree.GetGroupMembers(pgid);
+            if (leftovers.Count > 0)
+            {
+                AppendSystemLine(serviceId, runId, logPath,
+                    $"{leftovers.Count} process(es) it started are still running (PID {string.Join(", ", leftovers.Select(p => p.Pid))}); " +
+                    "DevDeck no longer manages them — end them yourself if they hold the service's port.");
+            }
+        }
 
         // Decided from the in-memory state the stop path sets, not from the run row's status:
         // a concurrent Stopping write could land on either side of this handler's update.

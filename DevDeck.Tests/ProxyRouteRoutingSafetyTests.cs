@@ -70,6 +70,7 @@ public sealed class ProxyRouteRoutingSafetyTests
     [InlineData("/api/{id:integer}")]
     [InlineData("/x/{slug:string}")]
     [InlineData("/y/{id:length(abc)}")]
+    [InlineData("/z/{x:regex(*)}/foo")] // compiled lazily: only the matcher build would throw
     public async Task Constraints_routing_cannot_resolve_are_refused(string matchPath)
     {
         var errors = await _builder.ValidateAsync(Route(1, "bad-constraint", r => r.MatchPath = matchPath));
@@ -144,8 +145,13 @@ public sealed class ProxyRouteRoutingSafetyTests
             Route(4, "api", r => r.MatchPath = "/api/{**rest}"),
             Route(5, "api-again", r => r.MatchPath = "/api/{**path}"),
             Route(6, "good", r => { r.MatchPath = "/good/{id:int}"; r.MatchHostsCsv = "localhost:*, 127.0.0.1:*"; }),
+            Route(7, "bad-regex", r => r.MatchPath = "/seven/{x:regex(*)}/foo"),
+            Route(8, "optional", r => r.MatchPath = "/opt/{id?}"),
+            Route(9, "required", r => r.MatchPath = "/opt/{id}"),
+            Route(10, "int", r => r.MatchPath = "/num/{id:int}"),
+            Route(11, "long", r => r.MatchPath = "/num/{id:long}"),
         ]);
-        build.Routes.Select(r => r.RouteId).Should().BeEquivalentTo("route-4", "route-6");
+        build.Routes.Select(r => r.RouteId).Should().BeEquivalentTo("route-4", "route-6", "route-8", "route-10");
 
         await using var app = await StartGatewayAsync(build);
         using var client = new HttpClient { BaseAddress = new Uri(Address(app)) };
@@ -154,6 +160,8 @@ public sealed class ProxyRouteRoutingSafetyTests
         // Reaches the proxy (its destination is down), rather than failing as ambiguous.
         (await client.GetAsync("/api/x")).StatusCode.Should().NotBe(HttpStatusCode.InternalServerError);
         (await client.GetAsync("/good/12")).StatusCode.Should().NotBe(HttpStatusCode.InternalServerError);
+        (await client.GetAsync("/opt/7")).StatusCode.Should().NotBe(HttpStatusCode.InternalServerError);
+        (await client.GetAsync("/num/7")).StatusCode.Should().NotBe(HttpStatusCode.InternalServerError);
     }
 
     [Fact]

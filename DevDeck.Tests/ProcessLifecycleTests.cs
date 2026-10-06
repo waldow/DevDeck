@@ -340,6 +340,28 @@ public sealed class ProcessLifecycleTests : IDisposable
     }
 
     [Fact]
+    public async Task Shared_build_servers_survive_a_force_kill_of_the_tree()
+    {
+        if (OperatingSystem.IsWindows() || !File.Exists("/bin/bash")) return;
+
+        // The kill fallback used Kill(entireProcessTree), which walks the live tree and took the
+        // build server down with a service that ignored SIGTERM. (The ignored disposition is
+        // inherited, so every process here outlives the graceful signal.)
+        var serviceId = await SeedServiceAsync("/bin/sh", "-c \"trap '' TERM; /bin/bash -c 'exec -a VBCSCompiler sleep 300' & sleep 300\"");
+        var manager = CreateManager(new DevDeckOptions { DevelopmentOnly = false, StopTimeoutSeconds = 1 });
+        (await manager.StartServiceAsync(serviceId, CancellationToken.None)).Success.Should().BeTrue();
+        var root = manager.GetRunningProcess(serviceId)!.Process;
+        var buildServer = await WaitForAsync(() => DescendantsIncludingSpared(root.Id).FirstOrDefault(ProcessTree.IsSharedBuildServer));
+        _spawnedPids.Add(buildServer);
+
+        var stop = await manager.StopServiceAsync(serviceId, CancellationToken.None);
+
+        stop.Success.Should().BeTrue();
+        (await RunAsync(serviceId)).Status.Should().Be(ProcessStatusNames.Killed);
+        ProcessTree.TryGetIdentity(buildServer, out _).Should().BeTrue();
+    }
+
+    [Fact]
     public void Build_servers_are_recognised_by_their_command_line()
     {
         var (file, serverArgs, plainArgs) = OperatingSystem.IsWindows()

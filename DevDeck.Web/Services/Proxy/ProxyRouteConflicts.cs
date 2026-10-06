@@ -49,12 +49,16 @@ public static class ProxyRouteConflicts
     }
 
     public static string Describe(ProxyRoute conflict) =>
-        $"Route '{conflict.Name}' already matches the same requests (same path template, order {conflict.Order} and hosts), " +
+        $"Route '{conflict.Name}' matches the same requests with the same priority (equivalent path template, order {conflict.Order} and hosts), " +
         "so every matching request would fail as ambiguous. Give one of them a different Order (lower wins) or path.";
 
     /// <summary>
-    /// The template as routing compares it: literals case-insensitively, parameters by shape
-    /// (catch-all, optional, constraints, default) but not by name. Null when it doesn't parse.
+    /// The template as routing ranks it: literals case-insensitively, parameters only by whether
+    /// they are a catch-all and whether they have any constraint. Route precedence ignores names,
+    /// optional markers, defaults and which constraint it is, so "/api/{id?}" vs "/api/{id}", or
+    /// "{id:int}" vs "{id:long}", both match "/api/7" equally. (Two constraints that never match
+    /// the same value, "{id:int}" vs "{id:alpha}", are reported too; a different Order settles
+    /// it.) Null when the template doesn't parse.
     /// </summary>
     public static string? CanonicalTemplate(string? matchPath)
     {
@@ -90,12 +94,7 @@ public static class ProxyRouteConflicts
                     case RoutePatternParameterPart parameter:
                         sb.Append('{');
                         if (parameter.IsCatchAll) sb.Append('*');
-                        if (parameter.IsOptional) sb.Append('?');
-                        foreach (var policy in parameter.ParameterPolicies)
-                        {
-                            sb.Append(':').Append(policy.Content ?? policy.ParameterPolicy?.GetType().FullName);
-                        }
-                        if (parameter.Default is not null) sb.Append('=').Append(parameter.Default);
+                        if (parameter.ParameterPolicies.Count > 0) sb.Append(':');
                         sb.Append('}');
                         break;
                 }

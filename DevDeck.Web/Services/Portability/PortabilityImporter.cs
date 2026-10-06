@@ -417,6 +417,7 @@ public sealed class PortabilityImporter
             if (src is null || string.IsNullOrWhiteSpace(src.Url)) continue;
             if (unmatched.TryGetValue(src.Url, out var candidates) && candidates.TryDequeue(out var dst))
             {
+                dst.Url = src.Url; // paired case-insensitively; the file's casing wins
                 dst.ExpectedStatusCode = src.ExpectedStatusCode;
                 dst.IntervalSeconds = src.IntervalSeconds;
                 dst.Enabled = src.Enabled;

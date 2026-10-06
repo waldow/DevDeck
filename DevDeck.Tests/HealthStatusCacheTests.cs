@@ -185,4 +185,69 @@ public sealed class HealthGateTests
         cache.RemoveService(1);
         HealthCheckBackgroundService.IsDue(cache, check, now.AddSeconds(31)).Should().BeTrue();
     }
+
+    [Fact]
+    public void A_failure_recorded_during_the_warmup_is_due_again_on_the_next_pass()
+    {
+        // Connection refused while the service was still coming up must not stand for a whole
+        // interval once it is up (the gate would answer 503 for a healthy service).
+        var cache = new HealthStatusCache();
+        var now = DateTimeOffset.UtcNow;
+        var check = new DevDeck.Web.Data.Entities.ServiceHealthCheck
+        {
+            Id = 10, DevServiceId = 1, Url = "http://localhost:1/", IntervalSeconds = 60,
+        };
+        cache.MarkStarting(1, TimeSpan.FromSeconds(15));
+
+        cache.Set(1, 10, HealthStatusNames.Unhealthy, now);
+        HealthCheckBackgroundService.IsDue(cache, check, now.AddSeconds(5)).Should().BeTrue();
+
+        cache.Set(1, 10, HealthStatusNames.Healthy, now);
+        HealthCheckBackgroundService.IsDue(cache, check, now.AddSeconds(5)).Should().BeFalse();
+
+        cache.Set(1, 10, HealthStatusNames.Unhealthy, now.AddSeconds(20));
+        HealthCheckBackgroundService.IsDue(cache, check, now.AddSeconds(25)).Should().BeFalse("recorded after the warm-up");
+    }
+
+    [Fact]
+    public void A_result_from_a_check_that_started_before_the_service_stopped_is_dropped()
+    {
+        var cache = new HealthStatusCache();
+        var checkStarted = DateTimeOffset.UtcNow.AddSeconds(-1);
+
+        cache.RemoveService(1);
+        cache.Set(1, 10, HealthStatusNames.Unhealthy, checkStarted);
+
+        cache.TryGetResult(1, 10, out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public void ForgetResults_drops_results_but_keeps_the_warmup()
+    {
+        var cache = new HealthStatusCache();
+        cache.Set(1, 10, HealthStatusNames.Unhealthy, DateTimeOffset.UtcNow.AddSeconds(-1));
+        cache.MarkStarting(1, TimeSpan.FromSeconds(15));
+
+        cache.ForgetResults(1);
+
+        cache.TryGetResult(1, 10, out _).Should().BeFalse();
+        cache.Get(1).Should().Be(HealthStatusNames.Warming);
+    }
+
+    [Fact]
+    public void A_passthru_instance_gets_one_warmup_until_it_is_seen_down()
+    {
+        // Re-granting on every request kept the gate open for good while a check stayed NotRunning.
+        var cache = new HealthStatusCache();
+        cache.SetMonitoredServices(new HashSet<int> { 1 });
+        cache.Set(1, 10, HealthStatusNames.NotRunning);
+
+        cache.MarkExternalStarting(1, TimeSpan.FromMilliseconds(-1)); // granted, already over
+        cache.MarkExternalStarting(1, TimeSpan.FromMinutes(1));       // not granted again
+        cache.IsHealthy(1).Should().BeFalse();
+
+        cache.ExternalInstanceDown(1);
+        cache.MarkExternalStarting(1, TimeSpan.FromMinutes(1));
+        cache.IsHealthy(1).Should().BeTrue();
+    }
 }

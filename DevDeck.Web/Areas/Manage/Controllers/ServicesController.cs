@@ -65,6 +65,8 @@ public sealed class ServicesController : Controller
         ViewBag.Presets = _presets.All();
         var runningIds = _manager.GetRunningProcesses().Select(r => r.DevServiceId).ToHashSet();
         ViewBag.RunningIds = runningIds;
+        ViewBag.StartingIds = services.Where(s => !runningIds.Contains(s.Id) && _manager.IsServiceStarting(s.Id))
+                                      .Select(s => s.Id).ToHashSet();
         ViewBag.PollMs = _options.Value.DashboardPollingMilliseconds;
         // First paint of the health pills; the Snapshot poll keeps them current. (A passthru
         // service's reachability is only known from the poll's port probe.)
@@ -260,6 +262,7 @@ public sealed class ServicesController : Controller
         }
 
         var runningPort = isRunning && entity.Port != model.Port ? entity.Port : null;
+        var oldEffectivePort = entity.EffectivePort;
 
         entity.Name = model.Name;
         entity.ServiceType = model.ServiceType;
@@ -278,10 +281,16 @@ public sealed class ServicesController : Controller
         entity.UpdatedUtc = DateTimeOffset.UtcNow;
 
         SyncEnvironmentVariables(db, entity, model);
-        SyncHealthChecks(db, entity, model);
+        var checksChanged = SyncHealthChecks(db, entity, model);
 
         await db.SaveChangesAsync();
         await _proxyProvider.ReloadAsync();
+        if (checksChanged || entity.EffectivePort != oldEffectivePort)
+        {
+            // The cached results describe the old URLs or port; until the next pass re-checks
+            // them, a stale Unhealthy would keep a RequireHealthyDestination route answering 503.
+            _healthStatusCache.ForgetResults(entity.Id);
+        }
         if (runningPort is int oldPort)
         {
             TempData["Info"] = $"Saved. '{entity.Name}' is still running with port {oldPort}; the proxy and health checks now use " +
@@ -312,6 +321,9 @@ public sealed class ServicesController : Controller
             var rendered = _renderer.Render(entity.Url,
                 CommandTemplateRenderer.BuildValues(entity.Id, entity.Name, entity.EffectivePort, entity.WorkingDirectory));
             if (rendered.UnknownPlaceholders.Count == 0) ViewBag.ResolvedUrl = rendered.Text;
+            // Only http(s) is ever a link: an imported "javascript:" URL must not become one.
+            ViewBag.UrlIsLink = Uri.TryCreate(rendered.Text, UriKind.Absolute, out var link) &&
+                                (link.Scheme == Uri.UriSchemeHttp || link.Scheme == Uri.UriSchemeHttps);
         }
         return View(entity);
     }
@@ -427,7 +439,7 @@ public sealed class ServicesController : Controller
     public async Task<IActionResult> StartAll(CancellationToken cancellationToken)
     {
         var result = await _manager.StartAllAsync(cancellationToken);
-        TempData["Info"] = $"Started {result.Started} services.";
+        SetBatchMessage("Started", result.Started, result.Outcomes);
         return RedirectToAction("Index", "Dashboard");
     }
 
@@ -451,8 +463,21 @@ public sealed class ServicesController : Controller
                 }),
             });
         }
-        TempData["Info"] = $"Stopped {result.Stopped} services.";
+        SetBatchMessage("Stopped", result.Stopped, result.Outcomes);
         return RedirectToAction("Index", "Dashboard");
+    }
+
+    // A batch's count alone would hide the services that failed.
+    private void SetBatchMessage(string verb, int succeeded, IReadOnlyCollection<ServiceActionOutcome> outcomes)
+    {
+        var failures = outcomes.Where(o => !o.Success).ToList();
+        if (failures.Count == 0)
+        {
+            TempData["Info"] = $"{verb} {succeeded} services.";
+            return;
+        }
+        TempData["Error"] = $"{verb} {succeeded} of {outcomes.Count} services. Failed: " +
+                            string.Join("; ", failures.Select(o => $"{o.ServiceName}: {o.Message}")) + ".";
     }
 
     private bool WantsJson()
@@ -531,12 +556,18 @@ public sealed class ServicesController : Controller
     private IActionResult RedirectBackOrDashboard()
     {
         var referer = Request.Headers["Referer"].ToString();
-        if (!string.IsNullOrEmpty(referer) && Uri.TryCreate(referer, UriKind.Absolute, out var uri))
+        if (!string.IsNullOrEmpty(referer) && Uri.TryCreate(referer, UriKind.Absolute, out var uri) &&
+            IsLocalPath(uri.PathAndQuery))
         {
-            return Redirect(uri.PathAndQuery);
+            return LocalRedirect(uri.PathAndQuery);
         }
         return RedirectToAction("Index", "Dashboard");
     }
+
+    // The Referer's path can itself look like a URL to another site: "http://localhost:5050//evil.example/x"
+    // has the path "//evil.example/x", which a browser follows off-site (as it does "/\evil.example").
+    internal static bool IsLocalPath(string path) =>
+        path.StartsWith('/') && !path.StartsWith("//", StringComparison.Ordinal) && !path.StartsWith("/\\", StringComparison.Ordinal);
 
     // Server-side checks beyond the data annotations: things that fail later (at process
     // launch) with a much worse error message if they get into the database.
@@ -636,7 +667,9 @@ public sealed class ServicesController : Controller
 
     private static void SyncEnvironmentVariables(DevDeckDbContext db, DevService entity, ServiceEditViewModel model)
     {
-        foreach (var row in model.EnvironmentVariables.Where(r => r.Delete && r.Id != 0))
+        // A saved row whose key was cleared is removed too, as it is skipped everywhere else:
+        // keeping it would silently keep the old variable (or collide with its re-added key).
+        foreach (var row in model.EnvironmentVariables.Where(r => r.Id != 0 && (r.Delete || string.IsNullOrWhiteSpace(r.Key))))
         {
             var existing = entity.EnvironmentVariables.FirstOrDefault(e => e.Id == row.Id);
             if (existing is not null) db.ServiceEnvironmentVariables.Remove(existing);
@@ -676,9 +709,13 @@ public sealed class ServicesController : Controller
         }
     }
 
-    private static void SyncHealthChecks(DevDeckDbContext db, DevService entity, ServiceEditViewModel model)
+    // Returns whether an existing check's target (URL or expected status) changed. (Results of
+    // removed checks are pruned by the poller; new checks have none yet.)
+    private static bool SyncHealthChecks(DevDeckDbContext db, DevService entity, ServiceEditViewModel model)
     {
-        foreach (var row in model.HealthChecks.Where(r => r.Delete && r.Id != 0))
+        var changed = false;
+        // Likewise a saved check whose URL was cleared.
+        foreach (var row in model.HealthChecks.Where(r => r.Id != 0 && (r.Delete || string.IsNullOrWhiteSpace(r.Url))))
         {
             var existing = entity.HealthChecks.FirstOrDefault(h => h.Id == row.Id);
             if (existing is not null) db.ServiceHealthChecks.Remove(existing);
@@ -698,6 +735,7 @@ public sealed class ServicesController : Controller
                 var existing = entity.HealthChecks.FirstOrDefault(h => h.Id == row.Id);
                 if (existing is not null)
                 {
+                    changed |= existing.Url != row.Url || existing.ExpectedStatusCode != row.ExpectedStatusCode;
                     existing.Url = row.Url;
                     existing.ExpectedStatusCode = row.ExpectedStatusCode;
                     existing.IntervalSeconds = row.IntervalSeconds;
@@ -705,5 +743,7 @@ public sealed class ServicesController : Controller
                 }
             }
         }
+
+        return changed;
     }
 }

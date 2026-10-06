@@ -49,6 +49,10 @@ builder.Services.PostConfigure<Microsoft.AspNetCore.HostFiltering.HostFilteringO
     o => AllowedHostsPolicy.IncludeDevDeckHosts(o, listenUrl));
 builder.Services.AddSingleton<AllowedHostsPolicy>();
 builder.Services.AddHttpClient();
+// For health checks that expect a redirect (3xx): following it would compare the target's
+// status instead — or fail outright on an untrusted dev certificate behind an HTTPS redirect.
+builder.Services.AddHttpClient(HealthCheckBackgroundService.NoRedirectClient)
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false });
 
 builder.Services.AddDbContextFactory<DevDeckDbContext>(options =>
     options.UseSqlite(DevDeckPaths.SqliteConnectionString));
@@ -281,12 +285,14 @@ internal sealed class AutoStartHostedService : BackgroundService
 internal sealed class StopServicesOnShutdownHostedService : IHostedLifecycleService
 {
     private readonly DevDeckProcessManager _manager;
-    private readonly Microsoft.Extensions.Options.IOptions<DevDeckOptions> _options;
+    // Read live, as AzuriteSupervisor reads it: Azurite follows the Functions hosts, so the two
+    // must not disagree when the setting is changed while DevDeck runs.
+    private readonly Microsoft.Extensions.Options.IOptionsMonitor<DevDeckOptions> _options;
     private readonly ILogger<StopServicesOnShutdownHostedService> _logger;
 
     public StopServicesOnShutdownHostedService(
         DevDeckProcessManager manager,
-        Microsoft.Extensions.Options.IOptions<DevDeckOptions> options,
+        Microsoft.Extensions.Options.IOptionsMonitor<DevDeckOptions> options,
         ILogger<StopServicesOnShutdownHostedService> logger)
     {
         _manager = manager;
@@ -303,7 +309,7 @@ internal sealed class StopServicesOnShutdownHostedService : IHostedLifecycleServ
         // Whether or not services are stopped, nothing new is launched while DevDeck goes down
         // (an auto-start or request in flight would otherwise start one after the Stop-all).
         _manager.BeginShutdown();
-        if (!_options.Value.StopServicesOnShutdown) return;
+        if (!_options.CurrentValue.StopServicesOnShutdown) return;
 
         try
         {

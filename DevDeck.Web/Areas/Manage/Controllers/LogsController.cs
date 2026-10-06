@@ -83,16 +83,10 @@ public sealed class LogsController : Controller
             return RedirectToAction("Details", "Runs", new { id = run.Id });
         }
 
-        // Open with FileShare.ReadWrite so a still-running service (whose LogFileWriter holds
-        // an open FileAccess.Write handle) doesn't cause a sharing violation. The framework
-        // disposes the returned stream after streaming it to the response.
-        var stream = new FileStream(
-            fullPath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete,
-            bufferSize: 4096,
-            useAsync: true);
-        return File(stream, "text/plain", Path.GetFileName(fullPath));
+        // PhysicalFile sends exactly the length the file has now: a stream result would set
+        // Content-Length up front and then copy to end-of-file, so a still-running service
+        // writing a line mid-download would break the response. (It opens the file with
+        // FileShare.ReadWrite, so the LogFileWriter's open handle is no sharing violation.)
+        return PhysicalFile(fullPath, "text/plain", Path.GetFileName(fullPath));
     }
 }

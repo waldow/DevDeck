@@ -17,6 +17,8 @@ public interface IDevDeckProcessManager
     LiveLogSlice GetLiveLogsSince(int serviceId, long since);
     /// <summary>True while a start, stop or restart of the service is in progress.</summary>
     bool IsServiceBusy(int serviceId);
+    /// <summary>True while a start is underway but its process is not yet tracked as running.</summary>
+    bool IsServiceStarting(int serviceId);
     void ClearLiveLogs(int serviceId);
     void AppendProxyLog(RunningProcessInfo info, string text);
 }

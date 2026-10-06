@@ -77,8 +77,8 @@ public sealed class LogRetentionService : BackgroundService
             : nowUtc.AddDays(-retentionDays);
 
     /// <summary>
-    /// One sweep: deletes old run logs except those of active runs (on Linux a deleted log a
-    /// running service still writes to would swallow its output), then clears the log path of
+    /// One sweep: deletes old run logs except those of active runs and Azurite's (on Linux a
+    /// deleted log a running process still writes to would swallow its output), then clears the log path of
     /// the finished runs whose file is gone. Returns how many files were deleted.
     /// </summary>
     public static async Task<int> SweepAsync(
@@ -95,6 +95,8 @@ public sealed class LogRetentionService : BackgroundService
                 .ToListAsync(cancellationToken))
             .Select(Path.GetFullPath)
             .ToHashSet(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        // Not a run log: a long-running Azurite may not have written to it for days.
+        activeLogs.Add(Path.GetFullPath(Path.Combine(folder, Path.GetFileName(AzuriteSupervisor.LogFile))));
 
         var deleted = SweepFolder(folder, deleteOlderThanUtc, logger, activeLogs);
         if (deleted.Count > 0)

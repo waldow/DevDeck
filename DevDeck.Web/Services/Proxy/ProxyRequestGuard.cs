@@ -52,6 +52,7 @@ public sealed class ProxyRequestGuard
 
                 if (!externalInstanceUp)
                 {
+                    _healthStatusCache.ExternalInstanceDown(serviceId);
                     await WriteUnavailableAsync(context, serviceId, "The external passthru instance is not reachable.");
                     return false;
                 }
@@ -59,7 +60,7 @@ public sealed class ProxyRequestGuard
                 var healthStatus = _healthStatusCache.Get(serviceId);
                 if (NeedsWarmup(healthStatus))
                 {
-                    _healthStatusCache.MarkStarting(serviceId, TimeSpan.FromSeconds(15));
+                    _healthStatusCache.MarkExternalStarting(serviceId, TimeSpan.FromSeconds(15));
                 }
             }
             else

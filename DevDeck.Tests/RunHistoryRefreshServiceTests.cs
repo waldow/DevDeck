@@ -313,6 +313,8 @@ public sealed class RunHistoryRefreshServiceTests : IDisposable
 
         public bool IsServiceBusy(int serviceId) => BusyServiceIds.Contains(serviceId);
 
+        public bool IsServiceStarting(int serviceId) => false;
+
         public void ClearLiveLogs(int serviceId)
         {
         }

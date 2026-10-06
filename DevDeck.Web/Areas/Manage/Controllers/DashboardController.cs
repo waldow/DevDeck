@@ -46,8 +46,14 @@ public sealed class DashboardController : Controller
         {
             var info = _manager.GetRunningProcess(s.Id);
 
+            // The link is on the gateway's own host, so only a route without Match hosts is sure
+            // to serve it; the lowest Order wins, as it does in routing.
             string? proxyUrl = null;
-            var route = proxies.FirstOrDefault(p => p.DevServiceId == s.Id);
+            var route = _options.Value.ReverseProxy.Enabled
+                ? proxies.Where(p => p.DevServiceId == s.Id && string.IsNullOrWhiteSpace(p.MatchHostsCsv))
+                         .OrderBy(p => p.Order).ThenBy(p => p.Id)
+                         .FirstOrDefault()
+                : null;
             if (route is not null)
             {
                 proxyUrl = $"{gateway}{ExampleProxyPath(route.MatchPath)}";
@@ -62,7 +68,8 @@ public sealed class DashboardController : Controller
                 UseExternalInstance = s.UseExternalInstance,
                 // Passthru runtime is determined by the polled snapshot's port probe; render an
                 // optimistic "External" initially and let the first tick correct it to "Offline".
-                RuntimeStatus = s.UseExternalInstance ? "External" : (info?.Status.ToString() ?? "Stopped"),
+                RuntimeStatus = s.UseExternalInstance ? "External"
+                    : info?.Status.ToString() ?? (_manager.IsServiceStarting(s.Id) ? "Starting" : "Stopped"),
                 HealthStatus = _healthStatusCache.GetDisplayStatus(s.Id, s.UseExternalInstance || info is not null),
                 Port = s.EffectivePort,
                 Url = DirectUrl(s),
@@ -92,7 +99,10 @@ public sealed class DashboardController : Controller
         var rendered = _renderer.Render(
             service.Url,
             CommandTemplateRenderer.BuildValues(service.Id, service.Name, service.EffectivePort, service.WorkingDirectory));
-        return rendered.UnknownPlaceholders.Count == 0 && Uri.TryCreate(rendered.Text, UriKind.Absolute, out _)
+        // Only http(s): an imported "javascript:" URL must not become a clickable link.
+        return rendered.UnknownPlaceholders.Count == 0 &&
+               Uri.TryCreate(rendered.Text, UriKind.Absolute, out var uri) &&
+               (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
             ? rendered.Text
             : null;
     }

@@ -60,20 +60,26 @@ internal static class ProcessTerminator
             ? "Killing process tree"
             : $"Process exited but left {Math.Max(leftovers.Count, 1)} process(es) running; killing them");
 
+        // Each process on its own, never Kill(entireProcessTree): that walks the live tree and
+        // would take the shared build servers down too, which GetDescendants leaves out (with
+        // their subtrees). The tree is re-read first for children started since the signal.
+        var toKill = (rootAlive && rootPid is int pid ? leftovers.Concat(ProcessTree.GetDescendants(pid)) : leftovers)
+            .DistinctBy(p => p.Pid)
+            .ToList();
         if (rootAlive)
         {
-            try { root.Kill(entireProcessTree: true); } catch { /* exited meanwhile */ }
+            try { root.Kill(); } catch { /* exited meanwhile */ }
         }
         if (group is int pgid)
         {
             SignalGroup(pgid, PosixSignals.SIGKILL);
         }
-        foreach (var leftover in leftovers)
+        foreach (var target in toKill)
         {
             try
             {
-                using var process = Process.GetProcessById(leftover.Pid);
-                if (ProcessTree.IsAlive(leftover)) process.Kill(entireProcessTree: true);
+                using var process = Process.GetProcessById(target.Pid);
+                if (ProcessTree.IsAlive(target)) process.Kill();
             }
             catch
             {
